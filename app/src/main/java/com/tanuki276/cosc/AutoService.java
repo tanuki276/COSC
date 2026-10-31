@@ -40,6 +40,10 @@ public final class AutoService extends Service {
     private static final String CHANNEL = "cosc_auto";
     private static final int NOTIFICATION_ID = 276;
 
+    private static final int CONTROL_LEFT = 0;
+    private static final int CONTROL_DRILL = 1;
+    private static final int CONTROL_RIGHT = 2;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean processingFrame = new AtomicBoolean(false);
     private final AtomicBoolean captureStarted = new AtomicBoolean(false);
@@ -157,7 +161,7 @@ public final class AutoService extends Service {
             displayWidth = dm.widthPixels;
             displayHeight = dm.heightPixels;
             densityDpi = dm.densityDpi;
-            densityScale = dm.density;
+            densityScale = Math.max(0.5f, dm.density);
 
             captureThread = new HandlerThread("cosc-capture", Thread.MAX_PRIORITY);
             captureThread.start();
@@ -184,7 +188,7 @@ public final class AutoService extends Service {
             }, captureHandler);
 
             try { shell.launchTarget(); } catch (Throwable ignored) { launchTargetDirect(); }
-            notifyText("VISION+INPUT READY · waiting for first frame");
+            notifyText("VISION+TOUCH READY · waiting for first frame");
         } catch (Throwable e) {
             notifyText("Stopped: " + message(e));
             stopAutomation();
@@ -244,12 +248,12 @@ public final class AutoService extends Service {
             long activeFor = now - drillStartedAt;
             boolean keepDrilling = d.type == GameAnalyzer.Type.DRILL;
             if ((activeFor >= 55 && !keepDrilling) || activeFor >= 145) {
-                int rc = s.keyEvent(62);
+                int rc = tapControl(s, CONTROL_DRILL);
                 if (rc == 0) {
                     drillActive = false;
                     lastDrillAt = now;
                 } else if (now - lastStatusAt > 350) {
-                    notifyText("DRILL CANCEL rejected rc=" + rc);
+                    notifyText("DRILL CANCEL tap rejected rc=" + rc);
                     lastStatusAt = now;
                 }
             }
@@ -259,13 +263,13 @@ public final class AutoService extends Service {
         switch (d.type) {
             case DRILL -> {
                 if (now - lastDrillAt < 120) return;
-                int rc = s.keyEvent(62);
+                int rc = tapControl(s, CONTROL_DRILL);
                 if (rc == 0) {
                     drillActive = true;
                     drillStartedAt = now;
                     lastDrillAt = now;
                 } else {
-                    notifyText("DRILL rejected rc=" + rc);
+                    notifyText("DRILL tap rejected rc=" + rc);
                 }
             }
             case LEFT -> move(-1, d.urgent, now, s);
@@ -286,14 +290,46 @@ public final class AutoService extends Service {
         if (now - lastMoveAt < minGap) return;
         int next = Math.max(0, Math.min(2, currentLane + Integer.signum(direction)));
         if (next == currentLane) return;
-        int rc = s.keyEvent(direction < 0 ? 21 : 22);
+
+        int rc = tapControl(s, direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
         if (rc == 0) {
             currentLane = next;
             lastMoveAt = now;
         } else if (now - lastStatusAt > 350) {
-            notifyText("MOVE rejected rc=" + rc);
+            notifyText("MOVE tap rejected rc=" + rc);
             lastStatusAt = now;
         }
+    }
+
+    /**
+     * CO-DUG's .touchControls are fixed at the bottom of the viewport:
+     * width=min(340 CSS px, 90vw), gap=10 CSS px, flex ratios 1:2:1,
+     * bottom=12 CSS px and min-height=50 CSS px. Convert those CSS coordinates
+     * back to physical pixels so input tap hits the real WebView buttons instead
+     * of depending on keyboard focus.
+     */
+    private int tapControl(ICoscService s, int control) throws Exception {
+        float scale = Math.max(0.5f, densityScale);
+        float cssW = displayWidth / scale;
+        float cssH = displayHeight / scale;
+        float boxW = Math.min(340f, cssW * 0.90f);
+        float gap = 10f;
+        float unit = Math.max(1f, (boxW - gap * 2f) / 4f);
+        float left = (cssW - boxW) * 0.5f;
+
+        float xCss;
+        if (control == CONTROL_LEFT) {
+            xCss = left + unit * 0.5f;
+        } else if (control == CONTROL_DRILL) {
+            xCss = left + unit + gap + unit;
+        } else {
+            xCss = left + unit + gap + unit * 2f + gap + unit * 0.5f;
+        }
+
+        float yCss = cssH - 37f;
+        int x = Math.max(0, Math.min(displayWidth - 1, Math.round(xCss * scale)));
+        int y = Math.max(0, Math.min(displayHeight - 1, Math.round(yCss * scale)));
+        return s.tap(x, y);
     }
 
     private Bitmap imageToBitmap(Image image) {
@@ -326,7 +362,7 @@ public final class AutoService extends Service {
             return;
         }
         try {
-            if (drillActive && shell != null) shell.keyEvent(62);
+            if (drillActive && shell != null) tapControl(shell, CONTROL_DRILL);
         } catch (Throwable ignored) {}
         drillActive = false;
         captureStarted.set(false);
