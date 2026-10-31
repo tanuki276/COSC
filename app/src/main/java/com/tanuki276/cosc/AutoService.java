@@ -11,7 +11,6 @@ import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.os.Build;
 import android.os.IBinder;
 
 import java.util.concurrent.ExecutorService;
@@ -32,6 +31,8 @@ public final class AutoService extends Service {
     private volatile ICoscService shell;
     private int currentLane = 1;
     private long lastDrillAt = 0;
+    private long lastMoveAt = 0;
+    private long lastStatusAt = 0;
     private float densityScale = 1f;
     private int physicalWidth = 1, physicalHeight = 1;
 
@@ -72,25 +73,33 @@ public final class AutoService extends Service {
             if (!waitForShizuku()) throw new IllegalStateException("Shizuku is not running or permission is missing");
             Shizuku.bindUserService(userServiceArgs, connection);
             long bindDeadline = System.currentTimeMillis() + 7000;
-            while (running.get() && shell == null && System.currentTimeMillis() < bindDeadline) sleep(100);
+            while (running.get() && shell == null && System.currentTimeMillis() < bindDeadline) sleep(80);
             if (shell == null) throw new IllegalStateException("Could not bind Shizuku UserService");
 
             parseDisplayInfo(shell.displayInfo());
             shell.launchTarget();
-            notifyText("CO-DUG launched · starting auto");
-            sleep(1300);
-            // SPACE starts the run directly from CO-DUG's intro screen.
+            notifyText("CO-DUG launched · predictive controller");
+            sleep(1200);
             shell.keyEvent(62);
-            sleep(650);
+            sleep(550);
 
+            int emptyFrames = 0;
             while (running.get()) {
-                byte[] jpeg = shell.captureJpeg(540, 62);
-                if (jpeg == null || jpeg.length == 0) { sleep(350); continue; }
-                Bitmap frame = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
-                if (frame == null) { sleep(300); continue; }
+                byte[] jpeg = shell.captureJpeg(600, 68);
+                if (jpeg == null || jpeg.length == 0) {
+                    emptyFrames++;
+                    if (emptyFrames > 8) {
+                        shell.launchTarget();
+                        emptyFrames = 0;
+                        sleep(750);
+                    } else sleep(180);
+                    continue;
+                }
+                emptyFrames = 0;
 
-                // wm size is reported in natural orientation on some devices. Match it to the
-                // actual screenshot before translating normalized tap coordinates.
+                Bitmap frame = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+                if (frame == null) { sleep(160); continue; }
+
                 boolean frameLandscape = frame.getWidth() > frame.getHeight();
                 boolean displayLandscape = physicalWidth > physicalHeight;
                 if (frameLandscape != displayLandscape) {
@@ -99,40 +108,63 @@ public final class AutoService extends Service {
                     physicalHeight = swap;
                 }
 
-                // Density must be scaled to match the downsampled screenshot.
                 float captureScale = physicalWidth > 0 ? frame.getWidth() / (float) physicalWidth : 1f;
                 float frameDensity = Math.max(1f, densityScale * captureScale);
-                GameAnalyzer.Decision d = analyzer.analyze(frame, currentLane, frameDensity,
-                        System.currentTimeMillis() - lastDrillAt);
+                long now = System.currentTimeMillis();
+                GameAnalyzer.Decision d = analyzer.analyze(frame, currentLane, frameDensity, now - lastDrillAt);
                 frame.recycle();
 
                 switch (d.type) {
-                    case LEFT -> {
-                        if (shell.keyEvent(21) == 0) currentLane = Math.max(0, currentLane - 1);
-                    }
-                    case RIGHT -> {
-                        if (shell.keyEvent(22) == 0) currentLane = Math.min(2, currentLane + 1);
-                    }
-                    case DRILL -> {
-                        if (shell.keyEvent(62) == 0) lastDrillAt = System.currentTimeMillis();
-                    }
+                    case LEFT -> move(-1, d.urgent);
+                    case RIGHT -> move(1, d.urgent);
+                    case DRILL -> drillPulse(d.urgent ? 205 : 155);
                     case TAP -> {
                         int x = Math.round(d.xNorm * physicalWidth);
                         int y = Math.round(d.yNorm * physicalHeight);
                         shell.tap(x, y);
+                        // Dialog/retry taps can reset lane position on a fresh run.
+                        if (d.reason.contains("retry") || d.reason.contains("primary")) currentLane = 1;
+                        sleep(260);
                     }
                     case NONE -> { }
                 }
-                notifyText("AUTO · lane " + (currentLane + 1) + " · " + d.reason);
-                sleep(240);
+
+                now = System.currentTimeMillis();
+                if (d.urgent || now - lastStatusAt > 900) {
+                    notifyText("AUTO+ · lane " + (currentLane + 1) + " · " + d.reason);
+                    lastStatusAt = now;
+                }
+                sleep(d.urgent ? 85 : 125);
             }
         } catch (Throwable e) {
             notifyText("Stopped: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
             getSharedPreferences("cosc", MODE_PRIVATE).edit().putString("last_error", String.valueOf(e)).apply();
-            sleep(1400);
+            sleep(1000);
         } finally {
             stopAutomation();
         }
+    }
+
+    private void move(int direction, boolean urgent) throws Exception {
+        long now = System.currentTimeMillis();
+        // CO-DUG itself has a 140 ms move cooldown. Keep our command stream just above it.
+        if (!urgent && now - lastMoveAt < 155) return;
+        int key = direction < 0 ? 21 : 22;
+        if (shell.keyEvent(key) == 0) {
+            currentLane = Math.max(0, Math.min(2, currentLane + Integer.signum(direction)));
+            lastMoveAt = now;
+        }
+    }
+
+    private void drillPulse(long durationMs) throws Exception {
+        long now = System.currentTimeMillis();
+        if (now - lastDrillAt < 330) return;
+        if (shell.keyEvent(62) != 0) return;
+        lastDrillAt = now;
+        // activateDrill() toggles off on the second SPACE. A short pulse destroys objects in the
+        // tip window while avoiding the full 0.5-0.9 s heat exposure of a normal drill cycle.
+        sleep(Math.max(110, Math.min(240, durationMs)));
+        shell.keyEvent(62);
     }
 
     private boolean waitForShizuku() {
@@ -185,7 +217,7 @@ public final class AutoService extends Service {
         PendingIntent openPi = PendingIntent.getActivity(this, 2, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("COSC · CO-DUG auto")
+                .setContentTitle("COSC · CO-DUG auto+")
                 .setContentText(text)
                 .setContentIntent(openPi)
                 .setOnlyAlertOnce(true)
