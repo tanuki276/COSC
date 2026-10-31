@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <instrumentation android:name="com.tanuki276.cosc.SmokeInstrumentation"
+        android:targetPackage="com.tanuki276.cosc.test"
+        tools:replace="android:targetPackage" />
+</manifest>

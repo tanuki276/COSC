@@ -206,7 +206,6 @@ public final class AutoService extends Service {
             if (feedback.mode == GameFeedback.Mode.ACTIVE) confirmedDrillFrames++;
             if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
                 lastOverlayTapAt = now;
-                lastDrillAt = now;
                 return;
             }
             GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, feedback, now);
