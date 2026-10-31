@@ -21,6 +21,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
 
@@ -41,7 +42,9 @@ public final class AutoService extends Service {
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean processingFrame = new AtomicBoolean(false);
+    private final AtomicBoolean captureStarted = new AtomicBoolean(false);
     private final GameAnalyzer analyzer = new GameAnalyzer();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private HandlerThread captureThread;
     private Handler captureHandler;
@@ -50,6 +53,8 @@ public final class AutoService extends Service {
     private VirtualDisplay virtualDisplay;
 
     private volatile ICoscService shell;
+    private int pendingResultCode;
+    private Intent pendingResultData;
     private int displayWidth;
     private int displayHeight;
     private int densityDpi;
@@ -69,11 +74,26 @@ public final class AutoService extends Service {
                     .version(BuildConfig.VERSION_CODE);
 
     private final ServiceConnection connection = new ServiceConnection() {
-        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder binder) {
             shell = ICoscService.Stub.asInterface(binder);
-            try { shell.launchTarget(); } catch (Throwable ignored) {}
+            try {
+                String ping = shell.ping();
+                notifyText("INPUT READY · " + ping);
+            } catch (Throwable e) {
+                notifyText("Input service connected, ping failed: " + message(e));
+            }
+            startCaptureAfterInputReady();
         }
-        @Override public void onServiceDisconnected(ComponentName name) { shell = null; }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            shell = null;
+            if (running.get()) {
+                notifyText("Stopped: Shizuku input service disconnected");
+                stopAutomation();
+            }
+        }
     };
 
     @Override
@@ -100,18 +120,39 @@ public final class AutoService extends Service {
             return START_NOT_STICKY;
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("Starting external capture…"));
-        if (running.compareAndSet(false, true)) startController(resultCode, resultData);
-        return START_NOT_STICKY;
-    }
+        startForeground(NOTIFICATION_ID, buildNotification("Waiting for Shizuku input service…"));
+        if (!running.compareAndSet(false, true)) return START_NOT_STICKY;
 
-    private void startController(int resultCode, Intent resultData) {
+        pendingResultCode = resultCode;
+        pendingResultData = resultData;
+        launchTargetDirect();
+
         try {
             if (!Shizuku.pingBinder() || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
                 throw new IllegalStateException("Shizuku permission is required");
             }
             Shizuku.bindUserService(userServiceArgs, connection);
+        } catch (Throwable e) {
+            notifyText("Stopped: " + message(e));
+            stopAutomation();
+            return START_NOT_STICKY;
+        }
 
+        mainHandler.postDelayed(() -> {
+            if (running.get() && shell == null && !captureStarted.get()) {
+                notifyText("Stopped: Shizuku input service did not connect");
+                stopAutomation();
+            }
+        }, 4000);
+
+        return START_NOT_STICKY;
+    }
+
+    private void startCaptureAfterInputReady() {
+        if (!running.get() || shell == null) return;
+        if (!captureStarted.compareAndSet(false, true)) return;
+
+        try {
             DisplayMetrics dm = getResources().getDisplayMetrics();
             displayWidth = dm.widthPixels;
             displayHeight = dm.heightPixels;
@@ -123,7 +164,9 @@ public final class AutoService extends Service {
             captureHandler = new Handler(captureThread.getLooper());
 
             MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
-            projection = mpm.getMediaProjection(resultCode, resultData);
+            projection = mpm.getMediaProjection(pendingResultCode, pendingResultData);
+            if (projection == null) throw new IllegalStateException("MediaProjection could not start");
+
             imageReader = ImageReader.newInstance(displayWidth, displayHeight, PixelFormat.RGBA_8888, 3);
             imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
             virtualDisplay = projection.createVirtualDisplay(
@@ -140,8 +183,8 @@ public final class AutoService extends Service {
                 @Override public void onStop() { stopAutomation(); }
             }, captureHandler);
 
-            launchTargetDirect();
-            notifyText("VISION · waiting for first frame");
+            try { shell.launchTarget(); } catch (Throwable ignored) { launchTargetDirect(); }
+            notifyText("VISION+INPUT READY · waiting for first frame");
         } catch (Throwable e) {
             notifyText("Stopped: " + message(e));
             stopAutomation();
@@ -192,31 +235,37 @@ public final class AutoService extends Service {
 
     private void applyDecision(GameAnalyzer.Decision d, long now) throws Exception {
         ICoscService s = shell;
-        if (s == null) return;
+        if (s == null) {
+            notifyText("INPUT NOT READY · dropping " + d.type);
+            return;
+        }
 
         if (drillActive) {
             long activeFor = now - drillStartedAt;
             boolean keepDrilling = d.type == GameAnalyzer.Type.DRILL;
-            // Second press cancels the active drill. Do it as soon as the target is gone,
-            // or cap the pulse so we never sit in a long heat-producing drill cycle.
             if ((activeFor >= 55 && !keepDrilling) || activeFor >= 145) {
-                if (s.keyEvent(62) == 0) {
+                int rc = s.keyEvent(62);
+                if (rc == 0) {
                     drillActive = false;
                     lastDrillAt = now;
+                } else if (now - lastStatusAt > 350) {
+                    notifyText("DRILL CANCEL rejected rc=" + rc);
+                    lastStatusAt = now;
                 }
             }
-            // Never side-step while the drill is physically active; cancel first and let the
-            // next frame decide the move. This prevents "move toward ore and miss it" behavior.
             return;
         }
 
         switch (d.type) {
             case DRILL -> {
                 if (now - lastDrillAt < 120) return;
-                if (s.keyEvent(62) == 0) {
+                int rc = s.keyEvent(62);
+                if (rc == 0) {
                     drillActive = true;
                     drillStartedAt = now;
                     lastDrillAt = now;
+                } else {
+                    notifyText("DRILL rejected rc=" + rc);
                 }
             }
             case LEFT -> move(-1, d.urgent, now, s);
@@ -224,7 +273,9 @@ public final class AutoService extends Service {
             case TAP -> {
                 int x = Math.round(d.xNorm * displayWidth);
                 int y = Math.round(d.yNorm * displayHeight);
-                if (s.tap(x, y) == 0) currentLane = 1;
+                int rc = s.tap(x, y);
+                if (rc == 0) currentLane = 1;
+                else notifyText("TAP rejected rc=" + rc);
             }
             case NONE -> { }
         }
@@ -235,9 +286,13 @@ public final class AutoService extends Service {
         if (now - lastMoveAt < minGap) return;
         int next = Math.max(0, Math.min(2, currentLane + Integer.signum(direction)));
         if (next == currentLane) return;
-        if (s.keyEvent(direction < 0 ? 21 : 22) == 0) {
+        int rc = s.keyEvent(direction < 0 ? 21 : 22);
+        if (rc == 0) {
             currentLane = next;
             lastMoveAt = now;
+        } else if (now - lastStatusAt > 350) {
+            notifyText("MOVE rejected rc=" + rc);
+            lastStatusAt = now;
         }
     }
 
@@ -274,6 +329,7 @@ public final class AutoService extends Service {
             if (drillActive && shell != null) shell.keyEvent(62);
         } catch (Throwable ignored) {}
         drillActive = false;
+        captureStarted.set(false);
         try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}
         try { if (virtualDisplay != null) virtualDisplay.release(); } catch (Throwable ignored) {}
         try { if (projection != null) projection.stop(); } catch (Throwable ignored) {}
@@ -282,6 +338,7 @@ public final class AutoService extends Service {
         virtualDisplay = null;
         projection = null;
         shell = null;
+        pendingResultData = null;
         if (captureThread != null) captureThread.quitSafely();
         captureThread = null;
         captureHandler = null;
