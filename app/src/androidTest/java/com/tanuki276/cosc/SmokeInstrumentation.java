@@ -38,7 +38,7 @@ public final class SmokeInstrumentation extends Instrumentation {
             // Full-display MediaProjectionConfig eliminates the app selection picker.
             long consentDeadline = SystemClock.uptimeMillis() + 15000;
             while (SystemClock.uptimeMillis() < consentDeadline) {
-                if (click(ui, "Start now", 500) || click(ui, "Start recording", 500)
+                if (click(ui, "Start", 500) || click(ui, "Start now", 500) || click(ui, "Start recording", 500)
                         || click(ui, "Share screen", 500)) break;
                 if (getTargetContext().getSharedPreferences("cosc", 0).getBoolean("running", false)) break;
             }
