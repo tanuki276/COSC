@@ -117,7 +117,7 @@ final class GameAnalyzer {
                 && y > tip + velocity * (f.cooldownSeconds + .15f))
             return Decision.none("cooldown ends before next rock: " + f.cooldownSeconds);
 
-        // Before committing to a row, prefer ore (cooling bonus), then an empty lane.
+        // Stay committed to a tracked row while the drill is ready.
         // During recovery, route away before body contact. Never switch through a
         // hazard which has already passed the drill tip but can still hit the body.
         float horizon = ready ? tip + velocity * .7f : body + velocity * .95f + 30 * scale;

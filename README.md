@@ -21,7 +21,8 @@ editing, APK patching, or injection into CO-DUG is used.
 ## Controller
 
 - Detects all eight rock fill palettes, including dark basalt/void/error stone.
-- Detects individual rock/ore centers rather than aggregate pixel percentages.
+- Confirms rock/ore centers in two distant frames, then tracks them on the
+  original 31 m row grid using visible depth, so the drill cannot hide a target.
 - Uses CO-DUG's real 39 CSS pixel drill collision window and an input lead time.
 - Starts a drill only when the visible HUD says READY and the heat stage permits.
 - Cancels only when the visible HUD confirms an active drill; waits for actual
@@ -44,6 +45,9 @@ without changing the checkout. Canvas frames from the original rock/ore/player
 renderer are fed to the same Java `GameAnalyzer` shipped in COSC. The Java bridge
 only substitutes pixel storage for Android Bitmap; it does not replace the
 analyzer. Results and end-state images are uploaded as workflow artifacts.
+
+The replay includes full 60 Hz rendering, camera shake, particles, and 65 ms
+input latency; perception samples at 12 fps.
 
 The replay uses a small DOM adapter for menus and structured HUD observations;
 it does not emulate Android accessibility, WebView font rendering, system

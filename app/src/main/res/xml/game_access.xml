@@ -5,6 +5,6 @@
     android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
-    android:notificationTimeout="50"
+    android:notificationTimeout="0"
     android:packageNames="com.tanuki276.codug"
     android:description="@string/access_description" />
