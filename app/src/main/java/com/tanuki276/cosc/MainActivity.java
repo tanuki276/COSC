@@ -7,7 +7,6 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -56,7 +55,7 @@ public final class MainActivity extends Activity {
         root.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView sub = new TextView(this);
-        sub.setText("CO-DUG Offline Smart Controller\nShizuku + screen analysis + key injection");
+        sub.setText("CO-DUG Direct Smart Controller\n50 ms native state bridge · deterministic planner");
         sub.setTextColor(Color.rgb(180, 190, 198));
         sub.setGravity(Gravity.CENTER);
         sub.setPadding(0, dp(6), 0, dp(20));
@@ -69,7 +68,7 @@ public final class MainActivity extends Activity {
         status.setBackgroundColor(Color.rgb(29, 35, 40));
         root.addView(status, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        grant = button("Grant Shizuku");
+        grant = button("Grant Shizuku (optional)");
         start = button("Start auto");
         stop = button("Stop auto");
         root.addView(grant);
@@ -77,7 +76,7 @@ public final class MainActivity extends Activity {
         root.addView(stop);
 
         TextView note = new TextView(this);
-        note.setText("COSC only targets com.tanuki276.codug. Keep the display awake while AUTO is running.\n\nThe first version uses conservative lane detection: drill when recovered, otherwise dodge toward the clearest lane. Static CO-DUG dialogs are handled with a primary-button / upgrade-choice heuristic.");
+        note.setText("AUTO now uses CO-DUG's direct local state bridge instead of screenshot guessing. Shizuku is kept available for diagnostics/fallback work, but Start does not wait for it.\n\nBoth COSC and CO-DUG must be updated to the matching bridge version.");
         note.setTextColor(Color.rgb(150, 160, 170));
         note.setPadding(0, dp(18), 0, 0);
         root.addView(note);
@@ -108,7 +107,6 @@ public final class MainActivity extends Activity {
     }
 
     private void startAuto() {
-        if (!hasShizukuPermission()) { requestShizuku(); return; }
         if (!targetInstalled()) {
             status.setText("CO-DUG (com.tanuki276.codug) is not installed.");
             return;
@@ -116,8 +114,8 @@ public final class MainActivity extends Activity {
         Intent i = new Intent(this, AutoService.class).setAction(AutoService.ACTION_START);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
         getSharedPreferences("cosc", MODE_PRIVATE).edit().putBoolean("running", true).apply();
-        status.setText("Starting AUTO… CO-DUG will open.");
-        start.postDelayed(this::refresh, 900);
+        status.setText("Starting DIRECT AUTO…");
+        start.postDelayed(this::refresh, 180);
     }
 
     private void stopAuto() {
@@ -131,33 +129,22 @@ public final class MainActivity extends Activity {
         catch (PackageManager.NameNotFoundException e) { return false; }
     }
 
-    private boolean hasShizukuPermission() {
-        try { return Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED; }
-        catch (Throwable e) { return false; }
-    }
-
     private void refresh() {
         runOnUiThread(() -> {
             boolean binder = false, permission = false;
-            int uid = -1;
             try {
                 binder = Shizuku.pingBinder();
-                if (binder) {
-                    permission = Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
-                    uid = Shizuku.getUid();
-                }
+                if (binder) permission = Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
             } catch (Throwable ignored) {}
             boolean running = getSharedPreferences("cosc", MODE_PRIVATE).getBoolean("running", false);
             String live = getSharedPreferences("cosc", MODE_PRIVATE).getString("status", "");
-            String text = "Shizuku: " + (binder ? "connected" : "not running")
-                    + "\nPermission: " + (permission ? "granted" : "not granted")
-                    + (uid >= 0 ? "\nShizuku UID: " + uid : "")
-                    + "\nCO-DUG: " + (targetInstalled() ? "installed" : "missing")
+            String text = "CO-DUG: " + (targetInstalled() ? "installed" : "missing")
                     + "\nAUTO: " + (running ? "running" : "stopped")
+                    + "\nShizuku: " + (binder ? (permission ? "ready (optional)" : "connected / no permission") : "not running (optional)")
                     + (live.isEmpty() ? "" : "\n" + live);
             status.setText(text);
             grant.setEnabled(binder && !permission);
-            start.setEnabled(permission && targetInstalled() && !running);
+            start.setEnabled(targetInstalled() && !running);
             stop.setEnabled(running);
         });
     }
