@@ -47,6 +47,7 @@ public final class SmokeInstrumentation extends Instrumentation {
             int maxDepth = 0, activeFrames = 0;
             long lastReport = 0;
             while (SystemClock.uptimeMillis() < deadline) {
+                if (maxDepth == 0) click(ui, "Got it", 250);
                 maxDepth = Math.max(maxDepth, prefs.getInt("observed_depth", 0));
                 activeFrames = Math.max(activeFrames, prefs.getInt("confirmed_drill_frames", 0));
                 if (SystemClock.uptimeMillis() - lastReport > 10000) {
