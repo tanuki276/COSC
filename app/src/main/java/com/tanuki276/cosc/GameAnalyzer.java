@@ -58,15 +58,23 @@ final class GameAnalyzer {
         ObjectHit here = next(objects[lane], body - 10 * scale);
         float y = here == null ? Float.POSITIVE_INFINITY : here.y;
         // Aim at the actual 39 CSS px destroy window, including input latency.
-        float arrivalY = y - velocity * .065f;
+        // Start before the leading edge: one capture interval + gesture dispatch
+        // + the next 60 Hz collision tick. A late command at the lower edge can
+        // miss the entire collision window at deep-layer speed.
+        float startLead = velocity * .16f;
+        float arrivalY = y - velocity * .085f;
         if (f.mode == GameFeedback.Mode.ACTIVE) {
             if (f.heat >= 55 || y > tip + 30 * scale)
                 return new Decision(Type.CANCEL, "confirmed DRILL: target cleared/heat guard");
             return Decision.none("confirmed DRILL: clearing object");
         }
         boolean ready = f.mode == GameFeedback.Mode.READY && f.heat < 48;
-        if (ready && arrivalY <= tip + 14 * scale && arrivalY >= tip - 23 * scale)
+        if (ready && y <= tip + 12 * scale + startLead && arrivalY >= tip - 8 * scale)
             return new Decision(Type.DRILL, here.ore ? "ore in destroy window" : "rock in destroy window");
+
+        if (f.mode == GameFeedback.Mode.COOLING
+                && y > tip + velocity * (f.cooldownSeconds + .15f))
+            return Decision.none("cooldown ends before next rock: " + f.cooldownSeconds);
 
         // Before committing to a row, prefer ore (cooling bonus), then an empty lane.
         // During recovery, route away before body contact. Never switch through a

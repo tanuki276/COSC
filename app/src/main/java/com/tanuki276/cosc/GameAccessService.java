@@ -50,6 +50,7 @@ public final class GameAccessService extends AccessibilityService {
                         String state = m.group(2);
                         f.mode = state.equals("READY") ? GameFeedback.Mode.READY
                                 : state.endsWith("%") ? GameFeedback.Mode.ACTIVE : GameFeedback.Mode.COOLING;
+                        if (state.endsWith("s")) f.cooldownSeconds = Float.parseFloat(state.substring(0, state.length() - 1));
                         f.heat = state.endsWith("%") ? Integer.parseInt(state.substring(0, state.length() - 1))
                                 : m.group(1).equals("GREEN") ? 21 : m.group(1).equals("YELLOW") ? 47
                                 : m.group(1).equals("ORANGE") ? 71 : 99;

@@ -64,7 +64,7 @@ async function main(){
    const mode=s.drill>0?'ACTIVE':s.drillCooldown>0?'COOLING':'READY';
    const stage=s.drillHeat<.22?21:s.drillHeat<.48?47:s.drillHeat<.72?71:99;
    const heat=s.drill>0?Math.round(s.drillHeat*100):stage;
-   const answer=await ask(`180 390 ${estimatedLane} ${mode} ${heat} ${Math.floor(s.depth)} ${s.tipReach} ${Math.round(time)} 0.5 ${zlib.deflateSync(bgra,{level:1}).toString('base64')}`);
+   const answer=await ask(`180 390 ${estimatedLane} ${mode} ${heat} ${Math.floor(s.depth)} ${s.tipReach} ${Math.round(time)} 0.5 ${zlib.deflateSync(bgra,{level:1}).toString('base64')} ${s.drillCooldown}`);
    if(!answer)throw Error('bridge exited');
    trace.push({depth:Math.round(s.depth),mode,heat,answer,threats:g.threats()});if(trace.length>12)trace.shift();
    if(s.hp<lastHp)console.log('DAMAGE '+JSON.stringify({seed,trace}));lastHp=s.hp;

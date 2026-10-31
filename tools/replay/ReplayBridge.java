@@ -17,6 +17,7 @@ public final class ReplayBridge {
             f.depth=Integer.parseInt(p[5]); f.tipReach=Integer.parseInt(p[6]);
             long now=Long.parseLong(p[7]); f.observedAt=now;
             float scale=Float.parseFloat(p[8]);
+            f.cooldownSeconds=Float.parseFloat(p[10]);
             byte[] packed=Base64.getDecoder().decode(p[9]);
             byte[] bytes=new java.util.zip.InflaterInputStream(new ByteArrayInputStream(packed)).readAllBytes();
             IntBuffer pixels=ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
