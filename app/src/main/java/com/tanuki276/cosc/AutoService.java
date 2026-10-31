@@ -47,6 +47,7 @@ public final class AutoService extends Service {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean processingFrame = new AtomicBoolean(false);
     private final AtomicBoolean captureStarted = new AtomicBoolean(false);
+    private final AtomicBoolean firstFrameSeen = new AtomicBoolean(false);
     private final GameAnalyzer analyzer = new GameAnalyzer();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -129,6 +130,7 @@ public final class AutoService extends Service {
 
         pendingResultCode = resultCode;
         pendingResultData = resultData;
+        firstFrameSeen.set(false);
         launchTargetDirect();
 
         try {
@@ -171,6 +173,17 @@ public final class AutoService extends Service {
             projection = mpm.getMediaProjection(pendingResultCode, pendingResultData);
             if (projection == null) throw new IllegalStateException("MediaProjection could not start");
 
+            // Android 14+ / targetSdk 34+ requires a MediaProjection callback to be
+            // registered BEFORE createVirtualDisplay(). The old order caused the
+            // capture session to fail before any frame reached the analyzer.
+            projection.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    if (running.get()) notifyText("Stopped: screen capture ended");
+                    stopAutomation();
+                }
+            }, captureHandler);
+
             imageReader = ImageReader.newInstance(displayWidth, displayHeight, PixelFormat.RGBA_8888, 3);
             imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
             virtualDisplay = projection.createVirtualDisplay(
@@ -183,12 +196,17 @@ public final class AutoService extends Service {
                     null,
                     captureHandler
             );
-            projection.registerCallback(new MediaProjection.Callback() {
-                @Override public void onStop() { stopAutomation(); }
-            }, captureHandler);
+            if (virtualDisplay == null) throw new IllegalStateException("VirtualDisplay could not start");
 
             try { shell.launchTarget(); } catch (Throwable ignored) { launchTargetDirect(); }
             notifyText("VISION+TOUCH READY · waiting for first frame");
+
+            mainHandler.postDelayed(() -> {
+                if (running.get() && captureStarted.get() && !firstFrameSeen.get()) {
+                    notifyText("Stopped: MediaProjection produced no frames");
+                    stopAutomation();
+                }
+            }, 2000);
         } catch (Throwable e) {
             notifyText("Stopped: " + message(e));
             stopAutomation();
@@ -199,6 +217,7 @@ public final class AutoService extends Service {
         if (!running.get()) return;
         Image image = reader.acquireLatestImage();
         if (image == null) return;
+        firstFrameSeen.set(true);
         if (!processingFrame.compareAndSet(false, true)) {
             image.close();
             return;
@@ -301,13 +320,6 @@ public final class AutoService extends Service {
         }
     }
 
-    /**
-     * CO-DUG's .touchControls are fixed at the bottom of the viewport:
-     * width=min(340 CSS px, 90vw), gap=10 CSS px, flex ratios 1:2:1,
-     * bottom=12 CSS px and min-height=50 CSS px. Convert those CSS coordinates
-     * back to physical pixels so input tap hits the real WebView buttons instead
-     * of depending on keyboard focus.
-     */
     private int tapControl(ICoscService s, int control) throws Exception {
         float scale = Math.max(0.5f, densityScale);
         float cssW = displayWidth / scale;
@@ -366,6 +378,7 @@ public final class AutoService extends Service {
         } catch (Throwable ignored) {}
         drillActive = false;
         captureStarted.set(false);
+        firstFrameSeen.set(false);
         try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}
         try { if (virtualDisplay != null) virtualDisplay.release(); } catch (Throwable ignored) {}
         try { if (projection != null) projection.stop(); } catch (Throwable ignored) {}
