@@ -44,6 +44,7 @@ jobs:
             adb install -r app/build/outputs/apk/debug/app-debug.apk
             adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb shell pm grant com.tanuki276.cosc android.permission.POST_NOTIFICATIONS
+            adb shell appops set com.tanuki276.cosc ACCESS_RESTRICTED_SETTINGS allow
             adb shell settings put secure enabled_accessibility_services com.tanuki276.cosc/.GameAccessService
             adb shell settings put secure accessibility_enabled 1
             adb shell am instrument -w com.tanuki276.cosc.test/com.tanuki276.cosc.SmokeInstrumentation | tee smoke-result.txt

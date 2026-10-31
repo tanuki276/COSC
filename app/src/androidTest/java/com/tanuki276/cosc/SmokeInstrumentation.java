@@ -19,13 +19,16 @@ public final class SmokeInstrumentation extends Instrumentation {
             click(ui, "Close app", 1000);
             startActivitySync(new Intent().setClassName("com.tanuki276.cosc", "com.tanuki276.cosc.MainActivity")
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            try (android.os.ParcelFileDescriptor.AutoCloseInputStream command = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
-                    ui.executeShellCommand("settings put secure enabled_accessibility_services com.tanuki276.cosc/.GameAccessService"))) { command.readAllBytes(); }
-            try (android.os.ParcelFileDescriptor.AutoCloseInputStream command = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
-                    ui.executeShellCommand("settings put secure accessibility_enabled 1"))) { command.readAllBytes(); }
+            shell(ui, "appops set com.tanuki276.cosc ACCESS_RESTRICTED_SETTINGS allow");
+            shell(ui, "settings delete secure enabled_accessibility_services");
+            shell(ui, "settings put secure enabled_accessibility_services com.tanuki276.cosc/com.tanuki276.cosc.GameAccessService");
+            shell(ui, "settings put secure accessibility_enabled 1");
             long accessDeadline = SystemClock.uptimeMillis() + 10000;
             while (GameAccessService.instance == null && SystemClock.uptimeMillis() < accessDeadline)
                 SystemClock.sleep(250);
+            if (GameAccessService.instance == null) throw new AssertionError("Accessibility did not bind: "
+                    + shell(ui, "settings get secure enabled_accessibility_services")
+                    + shell(ui, "dumpsys accessibility"));
             if (!click(ui, "Start external auto", 15000)) {
                 click(ui, "Close app", 1000);
                 startActivitySync(new Intent().setClassName("com.tanuki276.cosc", "com.tanuki276.cosc.MainActivity")
@@ -57,6 +60,12 @@ public final class SmokeInstrumentation extends Instrumentation {
         } catch (Throwable error) {
             result.putString("stream", "SMOKE_FAILED " + error + "\n");
             finish(Activity.RESULT_CANCELED, result);
+        }
+    }
+    private String shell(UiAutomation ui, String command) throws java.io.IOException {
+        try (android.os.ParcelFileDescriptor.AutoCloseInputStream input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                ui.executeShellCommand(command))) {
+            return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
         }
     }
     private boolean click(UiAutomation ui, String text, long timeout) {
