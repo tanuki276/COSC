@@ -44,12 +44,6 @@ public final class AutoService extends Service {
     private static final int CONTROL_DRILL = 1;
     private static final int CONTROL_RIGHT = 2;
 
-    // A drill activation itself adds heat in CO-DUG. Do not pulse/restart it.
-    private static final long MIN_DRILL_ACTIVE_MS = 80;
-    private static final long MAX_DRILL_ACTIVE_MS = 350;
-    private static final int CLEAR_FRAMES_TO_CANCEL = 2;
-    private static final int CLEAR_FRAMES_TO_REARM = 3;
-
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean processingFrame = new AtomicBoolean(false);
     private final AtomicBoolean captureStarted = new AtomicBoolean(false);
@@ -78,40 +72,6 @@ public final class AutoService extends Service {
     private long drillReadyAt;
     private long lastOverlayTapAt;
 
-    private boolean drillActive;
-    private boolean drillRearmBlocked;
-    private int drillClearFrames;
-    private int drillRearmClearFrames;
-
-    private final Shizuku.UserServiceArgs userServiceArgs =
-            new Shizuku.UserServiceArgs(new ComponentName("com.tanuki276.cosc", ShellService.class.getName()))
-                    .daemon(false)
-                    .processNameSuffix("shell")
-                    .debuggable(BuildConfig.DEBUG)
-                    .version(BuildConfig.VERSION_CODE);
-
-    private final ServiceConnection connection = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(ComponentName name, IBinder binder) {
-            shell = ICoscService.Stub.asInterface(binder);
-            try {
-                notifyText("INPUT READY · " + shell.ping());
-            } catch (Throwable e) {
-                notifyText("Input service connected, ping failed: " + message(e));
-            }
-            startCaptureAfterInputReady();
-        }
-
-        @Override
-        public void onServiceDisconnected(ComponentName name) {
-            shell = null;
-            if (running.get()) {
-                notifyText("Stopped: Shizuku input service disconnected");
-                stopAutomation();
-            }
-        }
-    };
-
     @Override
     public void onCreate() {
         super.onCreate();
@@ -136,42 +96,30 @@ public final class AutoService extends Service {
             return START_NOT_STICKY;
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("Waiting for Shizuku input service…"));
+        startForeground(NOTIFICATION_ID, buildNotification("Starting screen capture + HUD feedback…"));
         if (!running.compareAndSet(false, true)) return START_NOT_STICKY;
 
         pendingResultCode = resultCode;
         pendingResultData = resultData;
         firstFrameSeen.set(false);
-        resetDrillState();
         analyzer.reset();
         currentLane = 1;
         lastMoveAt = 0;
         lastOverlayTapAt = 0;
         launchTargetDirect();
 
-        try {
-            if (!Shizuku.pingBinder() || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                throw new IllegalStateException("Shizuku permission is required");
-            }
-            Shizuku.bindUserService(userServiceArgs, connection);
-        } catch (Throwable e) {
-            notifyText("Stopped: " + message(e));
+        if (GameAccessService.instance == null) {
+            notifyText("Stopped: enable COSC Accessibility feedback");
             stopAutomation();
             return START_NOT_STICKY;
         }
-
-        mainHandler.postDelayed(() -> {
-            if (running.get() && shell == null && !captureStarted.get()) {
-                notifyText("Stopped: Shizuku input service did not connect");
-                stopAutomation();
-            }
-        }, 4000);
+        startCaptureAfterInputReady();
 
         return START_NOT_STICKY;
     }
 
     private void startCaptureAfterInputReady() {
-        if (!running.get() || shell == null) return;
+        if (!running.get()) return;
         if (!captureStarted.compareAndSet(false, true)) return;
 
         try {
@@ -212,7 +160,7 @@ public final class AutoService extends Service {
             );
             if (virtualDisplay == null) throw new IllegalStateException("VirtualDisplay could not start");
 
-            try { shell.launchTarget(); } catch (Throwable ignored) { launchTargetDirect(); }
+            launchTargetDirect();
             notifyText("VISION+TOUCH READY · waiting for first frame");
 
             mainHandler.postDelayed(() -> {
@@ -252,14 +200,23 @@ public final class AutoService extends Service {
             float captureScale = scaled.getWidth() / (float) Math.max(1, displayWidth);
             float frameDensity = Math.max(0.01f, densityScale * captureScale);
             long now = SystemClock.uptimeMillis();
-            GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, now - lastDrillAt);
+            GameAccessService access = GameAccessService.instance;
+            if (access == null) throw new IllegalStateException("Enable COSC Accessibility feedback");
+            GameFeedback feedback = access.read();
+            if (!feedback.targetVisible) return;
+            if (now - lastOverlayTapAt > 800 && access.handleMenu()) {
+                lastOverlayTapAt = now;
+                lastDrillAt = now;
+                analyzer.reset();
+                return;
+            }
+            GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, feedback, now);
+            if (analyzer.observedLane >= 0 && now - lastMoveAt > 280)
+                currentLane = analyzer.observedLane;
             applyDecision(decision, now);
 
             if (decision.urgent || now - lastStatusAt > 650) {
-                String guard = drillRearmBlocked ? " · LOCK" : "";
-                notifyText("VISION · L" + (currentLane + 1)
-                        + (drillActive ? " · DRILL" : "")
-                        + guard + " · " + decision.reason);
+                notifyText("VISION · L" + (currentLane + 1) + " · " + decision.reason);
                 lastStatusAt = now;
             }
         } catch (Throwable e) {
@@ -276,107 +233,18 @@ public final class AutoService extends Service {
     }
 
     private void applyDecision(GameAnalyzer.Decision d, long now) throws Exception {
-        ICoscService s = shell;
-        if (s == null) {
-            notifyText("INPUT NOT READY · dropping " + d.type);
-            return;
-        }
-
-        // A successful shell command does not prove that a WebView accepted a toggle.
-        // Never send a late "cancel" after the base 500 ms drill has expired: that
-        // would start a second activation instead. Cooldown may reach 0.32 * 3.2 s.
-        if (drillActive && now - drillStartedAt >= 450) {
-            drillActive = false;
-            drillRearmBlocked = true;
-            drillReadyAt = now + 1100;
-        }
-        if (d.type == GameAnalyzer.Type.TAP) {
-            if (now - lastOverlayTapAt < 1000) return;
-            int rc = s.tap(Math.round(d.xNorm * displayWidth), Math.round(d.yNorm * displayHeight));
-            if (rc == 0) {
-                currentLane = 1;
-                resetDrillState();
-                analyzer.reset();
-                lastOverlayTapAt = now;
-            }
-            return;
-        }
-
-        // Once started, keep one drill activation alive. The old code forcibly cancelled
-        // at 145 ms and immediately restarted the same target, which stacked activation heat.
-        if (drillActive) {
-            long activeFor = now - drillStartedAt;
-            boolean targetStillPresent = d.type == GameAnalyzer.Type.DRILL;
-
-            if (targetStillPresent) {
-                drillClearFrames = 0;
-                if (activeFor >= MAX_DRILL_ACTIVE_MS) {
-                    cancelDrillAndBlock(s, now, "safety timeout");
-                }
-            } else {
-                drillClearFrames++;
-                if (activeFor >= MIN_DRILL_ACTIVE_MS && drillClearFrames >= CLEAR_FRAMES_TO_CANCEL) {
-                    cancelDrillAndBlock(s, now, "target clear");
-                }
-            }
-            return;
-        }
-
-        // After cancelling, do not re-fire on the same object/noisy pixels. Require several
-        // consecutive frames with no DRILL request before a new activation can be armed.
-        if (drillRearmBlocked) {
-            if (d.type == GameAnalyzer.Type.DRILL) {
-                drillRearmClearFrames = 0;
-                return;
-            }
-            drillRearmClearFrames++;
-            if (drillRearmClearFrames < CLEAR_FRAMES_TO_REARM) return;
-            drillRearmBlocked = false;
-            drillRearmClearFrames = 0;
-        }
-
+        GameAccessService access = GameAccessService.instance;
+        if (access == null) throw new IllegalStateException("COSC accessibility feedback disconnected");
+        // Rate-limit requests until a NEW HUD frame confirms the last toggle.
+        if (now - lastDrillAt < 160) return;
         switch (d.type) {
-            case DRILL -> {
-                if (now < drillReadyAt) return;
-                int rc = tapControl(s, CONTROL_DRILL);
-                if (rc == 0) {
-                    drillActive = true;
-                    drillStartedAt = now;
-                    drillClearFrames = 0;
-                    lastDrillAt = now;
-                } else {
-                    notifyText("DRILL tap rejected rc=" + rc);
-                }
+            case DRILL, CANCEL -> {
+                int rc = tapControl(shell, CONTROL_DRILL);
+                if (rc == 0) lastDrillAt = SystemClock.uptimeMillis();
             }
-            case LEFT -> move(-1, d.urgent, now, s);
-            case RIGHT -> move(1, d.urgent, now, s);
-            case TAP -> {
-                int x = Math.round(d.xNorm * displayWidth);
-                int y = Math.round(d.yNorm * displayHeight);
-                int rc = s.tap(x, y);
-                if (rc == 0) currentLane = 1;
-                else notifyText("TAP rejected rc=" + rc);
-            }
-            case NONE -> { }
-        }
-    }
-
-    private void cancelDrillAndBlock(ICoscService s, long now, String reason) throws Exception {
-        int rc = tapControl(s, CONTROL_DRILL);
-        if (rc == 0) {
-            drillActive = false;
-            drillRearmBlocked = true;
-            drillClearFrames = 0;
-            drillRearmClearFrames = 0;
-            lastDrillAt = now;
-            drillReadyAt = now + 1100;
-            if (now - lastStatusAt > 250) {
-                notifyText("DRILL OFF · " + reason);
-                lastStatusAt = now;
-            }
-        } else if (now - lastStatusAt > 350) {
-            notifyText("DRILL CANCEL tap rejected rc=" + rc);
-            lastStatusAt = now;
+            case LEFT -> move(-1, d.urgent, now, shell);
+            case RIGHT -> move(1, d.urgent, now, shell);
+            default -> { }
         }
     }
 
@@ -417,7 +285,8 @@ public final class AutoService extends Service {
         float yCss = cssH - 37f;
         int x = Math.max(0, Math.min(displayWidth - 1, Math.round(xCss * scale)));
         int y = Math.max(0, Math.min(displayHeight - 1, Math.round(yCss * scale)));
-        return s.tap(x, y);
+        GameAccessService access = GameAccessService.instance;
+        return access == null ? -3 : access.tap(x, y);
     }
 
     private Bitmap imageToBitmap(Image image) {
@@ -443,16 +312,6 @@ public final class AutoService extends Service {
         try { startActivity(i); } catch (Throwable ignored) {}
     }
 
-    private void resetDrillState() {
-        drillActive = false;
-        drillRearmBlocked = false;
-        drillClearFrames = 0;
-        drillRearmClearFrames = 0;
-        drillStartedAt = 0;
-        lastDrillAt = 0;
-        drillReadyAt = 0;
-    }
-
     private void stopAutomation() {
         if (!running.getAndSet(false)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -460,16 +319,13 @@ public final class AutoService extends Service {
             return;
         }
         try {
-            if (drillActive && shell != null && SystemClock.uptimeMillis() - drillStartedAt < 450)
-                tapControl(shell, CONTROL_DRILL);
+            // Do not toggle on shutdown: the latest HUD may already show natural expiry.
         } catch (Throwable ignored) {}
-        resetDrillState();
         captureStarted.set(false);
         firstFrameSeen.set(false);
         try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}
         try { if (virtualDisplay != null) virtualDisplay.release(); } catch (Throwable ignored) {}
         try { if (projection != null) projection.stop(); } catch (Throwable ignored) {}
-        try { Shizuku.unbindUserService(userServiceArgs, connection, true); } catch (Throwable ignored) {}
         imageReader = null;
         virtualDisplay = null;
         projection = null;

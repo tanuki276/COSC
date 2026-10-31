@@ -57,7 +57,7 @@ public final class MainActivity extends Activity {
         root.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView sub = new TextView(this);
-        sub.setText("CO-DUG external controller\nMediaProjection + predictive vision + Shizuku input");
+        sub.setText("CO-DUG external controller\nScreen vision + live HUD feedback + touch");
         sub.setTextColor(Color.rgb(180, 190, 198));
         sub.setGravity(Gravity.CENTER);
         sub.setPadding(0, dp(6), 0, dp(20));
@@ -70,15 +70,18 @@ public final class MainActivity extends Activity {
         status.setBackgroundColor(Color.rgb(29, 35, 40));
         root.addView(status, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        Button access = button("Enable CO-DUG feedback (Accessibility)");
+        access.setOnClickListener(v -> startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        root.addView(access);
         grant = button("Grant Shizuku");
         start = button("Start external auto");
         stop = button("Stop auto");
-        root.addView(grant);
+
         root.addView(start);
         root.addView(stop);
 
         TextView note = new TextView(this);
-        note.setText("CO-DUG itself is not modified. AUTO reads only the visible screen through Android screen capture and injects input through Shizuku. Capture arrives at the display frame rate; the controller predicts between frames instead of pretending the screen updates every 1 ms.");
+        note.setText("Enable COSC in Accessibility, then start AUTO and allow full-screen capture. COSC reads CO-DUG’s visible HUD and canvas. Shizuku is not required in this version. CO-DUG itself is not modified.");
         note.setTextColor(Color.rgb(150, 160, 170));
         note.setPadding(0, dp(18), 0, 0);
         root.addView(note);
@@ -109,12 +112,13 @@ public final class MainActivity extends Activity {
     }
 
     private void startAuto() {
-        if (!targetInstalled()) {
-            status.setText("CO-DUG (com.tanuki276.codug) is not installed.");
+        if (GameAccessService.instance == null) {
+            status.setText("Enable COSC in Accessibility first. HUD feedback is required for reliable drilling.");
+            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
             return;
         }
-        if (!hasShizukuPermission()) {
-            requestShizuku();
+        if (!targetInstalled()) {
+            status.setText("CO-DUG (com.tanuki276.codug) is not installed.");
             return;
         }
         MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
@@ -168,11 +172,11 @@ public final class MainActivity extends Activity {
             String live = getSharedPreferences("cosc", MODE_PRIVATE).getString("status", "");
             String text = "CO-DUG: " + (targetInstalled() ? "installed" : "missing")
                     + "\nAUTO: " + (running ? "running" : "stopped")
-                    + "\nShizuku: " + (binder ? (permission ? "ready" : "connected / no permission") : "not running")
+                    + "\nHUD feedback: " + (GameAccessService.instance != null ? "ready" : "enable Accessibility")
                     + (live.isEmpty() ? "" : "\n" + live);
             status.setText(text);
             grant.setEnabled(binder && !permission);
-            start.setEnabled(targetInstalled() && permission && !running);
+            start.setEnabled(targetInstalled() && !running);
             stop.setEnabled(running);
         });
     }
