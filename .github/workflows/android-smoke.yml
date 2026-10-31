@@ -1,6 +1,5 @@
 name: Android HUD and gesture smoke
 on:
-  pull_request:
   workflow_dispatch:
 jobs:
   android:

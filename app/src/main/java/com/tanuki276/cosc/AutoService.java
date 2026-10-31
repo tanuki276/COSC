@@ -45,6 +45,9 @@ public final class AutoService extends Service {
     private final AtomicBoolean captureStarted = new AtomicBoolean(false);
     private final AtomicBoolean firstFrameSeen = new AtomicBoolean(false);
     private final GameAnalyzer analyzer = new GameAnalyzer();
+    private final ControlTiming timing = new ControlTiming();
+    private long lastFrameAt;
+    private float framePeriodMs=83;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private HandlerThread captureThread;
@@ -99,6 +102,7 @@ public final class AutoService extends Service {
         pendingResultData = resultData;
         firstFrameSeen.set(false);
         analyzer.reset();
+        timing.reset();
         currentLane = 1;
         observedDepth = 0;
         confirmedDrillFrames = 0;
@@ -185,23 +189,39 @@ public final class AutoService extends Service {
 
         Bitmap frame = null;
         Bitmap scaled = null;
+        Bitmap cropped = null;
+        long acquiredAt=SystemClock.uptimeMillis();
+        long ageNanos=System.nanoTime()-image.getTimestamp();
+        long capturedAt=ageNanos>=0&&ageNanos<2_000_000_000L?acquiredAt-ageNanos/1_000_000L:acquiredAt;
         try {
+            if(acquiredAt-capturedAt>400)return;
+            GameAccessService access=GameAccessService.instance;
+            if(access==null)throw new IllegalStateException("Enable COSC Accessibility feedback");
+            GameFeedback feedback=access.read();
+            if(!feedback.targetVisible)return;
+            if(feedback.gameOver){notifyText("Stopped: collision/game over at "+feedback.depth+"m");mainHandler.post(this::stopAutomation);return;}
             frame = imageToBitmap(image);
             if (frame == null) return;
 
-            int targetWidth = Math.min(480, frame.getWidth());
-            int targetHeight = Math.max(1, Math.round(frame.getHeight() * (targetWidth / (float) frame.getWidth())));
-            scaled = frame.getWidth() == targetWidth
-                    ? frame
-                    : Bitmap.createScaledBitmap(frame, targetWidth, targetHeight, false);
+            if(feedback.viewWidth>frame.getWidth()*.7f&&feedback.viewHeight>frame.getHeight()*.6f){
+                int left=Math.max(0,feedback.viewLeft),top=Math.max(0,feedback.viewTop);
+                int w=Math.min(feedback.viewWidth,frame.getWidth()-left),h=Math.min(feedback.viewHeight,frame.getHeight()-top);
+                if(w>0&&h>0)cropped=Bitmap.createBitmap(frame,left,top,w,h);
+            }
+            Bitmap source=cropped==null?frame:cropped;
+            int targetWidth = Math.min(480, source.getWidth());
+            int targetHeight = Math.max(1, Math.round(source.getHeight() * (targetWidth / (float) source.getWidth())));
+            scaled = source.getWidth() == targetWidth
+                    ? source
+                    : Bitmap.createScaledBitmap(source, targetWidth, targetHeight, false);
 
-            float captureScale = scaled.getWidth() / (float) Math.max(1, displayWidth);
-            float frameDensity = Math.max(0.01f, densityScale * captureScale);
-            long now = SystemClock.uptimeMillis();
-            GameAccessService access = GameAccessService.instance;
-            if (access == null) throw new IllegalStateException("Enable COSC Accessibility feedback");
-            GameFeedback feedback = access.read();
-            if (!feedback.targetVisible) return;
+            float captureScale=scaled.getWidth()/(float)source.getWidth();
+            float frameDensity=Math.max(.01f,(feedback.cssScale>0?feedback.cssScale:densityScale)*captureScale);
+            long now=SystemClock.uptimeMillis();
+            if(lastFrameAt>0&&capturedAt>lastFrameAt)framePeriodMs=framePeriodMs*.8f+Math.min(400,capturedAt-lastFrameAt)*.2f;
+            lastFrameAt=capturedAt;
+            feedback.atFrame(capturedAt,now);feedback.lastMoveAt=lastMoveAt;
+            feedback.inputLatencyMs=timing.latencyMs();feedback.framePeriodMs=framePeriodMs;
             observedDepth = feedback.depth;
             if (feedback.mode == GameFeedback.Mode.ACTIVE) confirmedDrillFrames++;
             if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
@@ -209,7 +229,7 @@ public final class AutoService extends Service {
                 return;
             }
             GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, feedback, now);
-            if (analyzer.observedLane >= 0 && now - lastMoveAt > 280)
+            if (analyzer.observedLane >= 0 && (capturedAt-lastMoveAt)>220)
                 currentLane = analyzer.observedLane;
             applyDecision(decision, now);
 
@@ -223,7 +243,8 @@ public final class AutoService extends Service {
                 lastStatusAt = SystemClock.uptimeMillis();
             }
         } finally {
-            if (scaled != null && scaled != frame) scaled.recycle();
+            if (scaled != null && scaled != frame && scaled != cropped) scaled.recycle();
+            if (cropped != null && cropped != frame) cropped.recycle();
             if (frame != null) frame.recycle();
             image.close();
             processingFrame.set(false);
@@ -239,11 +260,13 @@ public final class AutoService extends Service {
         GameAccessService access = GameAccessService.instance;
         if (access == null) throw new IllegalStateException("COSC accessibility feedback disconnected");
         // Rate-limit requests until a NEW HUD frame confirms the last toggle.
-        if (now - lastDrillAt < 160) return;
+        GameFeedback current=access.read();
+        if(!timing.allow(d.type,current,SystemClock.uptimeMillis()))return;
         switch (d.type) {
             case DRILL, CANCEL -> {
+                long requestedAt=SystemClock.uptimeMillis();
                 int rc = tapControl(CONTROL_DRILL);
-                if (rc == 0) lastDrillAt = SystemClock.uptimeMillis();
+                if(rc==0){lastDrillAt=SystemClock.uptimeMillis();timing.accepted(d.type,requestedAt);analyzer.accepted(d);}
             }
             case LEFT -> move(-1, d.urgent, now);
             case RIGHT -> move(1, d.urgent, now);
@@ -260,7 +283,7 @@ public final class AutoService extends Service {
         int rc = tapControl(direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
         if (rc == 0) {
             currentLane = next;
-            lastMoveAt = now;
+            lastMoveAt = SystemClock.uptimeMillis();
         } else if (now - lastStatusAt > 350) {
             notifyText("MOVE tap rejected rc=" + rc);
             lastStatusAt = now;
@@ -268,28 +291,8 @@ public final class AutoService extends Service {
     }
 
     private int tapControl(int control) throws Exception {
-        float scale = Math.max(0.5f, densityScale);
-        float cssW = displayWidth / scale;
-        float cssH = displayHeight / scale;
-        float boxW = Math.min(340f, cssW * 0.90f);
-        float gap = 10f;
-        float unit = Math.max(1f, (boxW - gap * 2f) / 4f);
-        float left = (cssW - boxW) * 0.5f;
-
-        float xCss;
-        if (control == CONTROL_LEFT) {
-            xCss = left + unit * 0.5f;
-        } else if (control == CONTROL_DRILL) {
-            xCss = left + unit + gap + unit;
-        } else {
-            xCss = left + unit + gap + unit * 2f + gap + unit * 0.5f;
-        }
-
-        float yCss = cssH - 37f;
-        int x = Math.max(0, Math.min(displayWidth - 1, Math.round(xCss * scale)));
-        int y = Math.max(0, Math.min(displayHeight - 1, Math.round(yCss * scale)));
         GameAccessService access = GameAccessService.instance;
-        return access == null ? -3 : access.tap(x, y);
+        return access == null ? -3 : access.tapControl(control);
     }
 
     private Bitmap imageToBitmap(Image image) {

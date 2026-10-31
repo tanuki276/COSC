@@ -16,6 +16,8 @@ final class GameAnalyzer {
         final float xNorm, yNorm;
         final String reason;
         final boolean urgent;
+        int rowIndex = -1;
+        int lane = -1;
         Decision(Type type, String reason) { this(type, 0, 0, reason, false); }
         Decision(Type type, float x, float y, String reason, boolean urgent) {
             this.type = type; xNorm = x; yNorm = y; this.reason = reason; this.urgent = urgent;
@@ -32,6 +34,7 @@ final class GameAnalyzer {
     static final class ObjectHit {
         final float y;
         final boolean ore;
+        int rowIndex=-1;
         ObjectHit(float y, boolean ore) { this.y = y; this.ore = ore; }
     }
     private int[] pixels;
@@ -46,8 +49,14 @@ final class GameAnalyzer {
     private final Map<Integer, RowTrack> tracks = new HashMap<>();
     private int frameNumber;
     private int previousDepth;
+    private int drillingRow=-1, drillingLane=-1;
     int observedLane = -1;
-    void reset() { observedLane = -1; tracks.clear(); frameNumber = 0; previousDepth = 0; }
+    void reset() { observedLane = -1; tracks.clear(); frameNumber = 0; previousDepth = 0; drillingRow=-1;drillingLane=-1; }
+
+    void accepted(Decision d) {
+        if(d.type==Type.DRILL){drillingRow=d.rowIndex;drillingLane=d.lane;}
+        if(d.type==Type.CANCEL){drillingRow=-1;drillingLane=-1;}
+    }
 
     Decision analyze(Bitmap b, int lane, float scale, long ignored) {
         // No reliable readiness feedback => never toggle a drill speculatively.
@@ -55,9 +64,9 @@ final class GameAnalyzer {
     }
 
     Decision analyze(Bitmap b, int lane, float scale, GameFeedback f, long now) {
-        if (b == null || !f.targetVisible || now - f.observedAt > 300)
+        if (b == null || !f.targetVisible || now - f.observedAt > 1200)
             return Decision.none("waiting for target/HUD");
-        if (f.mode == GameFeedback.Mode.UNKNOWN || f.mode == GameFeedback.Mode.MENU)
+        if (f.paused || f.mode == GameFeedback.Mode.UNKNOWN || f.mode == GameFeedback.Mode.MENU)
             return Decision.none("waiting for menu/HUD");
         int size = b.getWidth() * b.getHeight();
         if (pixels == null || pixels.length != size) pixels = new int[size];
@@ -65,6 +74,7 @@ final class GameAnalyzer {
         b.getPixels(pixels, 0, pixelWidth, 0, 0, pixelWidth, b.getHeight());
         scale = Math.max(0.01f, scale);
         observedLane = detectPlayer(b, scale);
+        if(observedLane>=0 && (f.frameAt>0?f.frameAt:now)-f.lastMoveAt>220)lane=observedLane;
         List<ObjectHit>[] observed = detect(b, scale, lane);
         float body = b.getHeight() * .32f;
         float tip = body + (67 + f.tipReach) * scale;
@@ -77,7 +87,7 @@ final class GameAnalyzer {
         for (int l = 0; l < 3; l++) for (ObjectHit hit : observed[l]) {
             float distance = (hit.y - body) / scale;
             if (distance < 140 || distance > 380) continue;
-            float worldDepth = f.depth + distance / 3.25f;
+            float worldDepth = f.imageDepth() + distance / 3.25f;
             int index = Math.round((worldDepth - 90) / 31);
             if (index < 0 || Math.abs(worldDepth - (index * 31 + 90)) > 8) continue;
             RowTrack track = tracks.computeIfAbsent(index, RowTrack::new);
@@ -87,14 +97,18 @@ final class GameAnalyzer {
         @SuppressWarnings("unchecked")
         List<ObjectHit>[] objects = new List[]{new ArrayList<>(),new ArrayList<>(),new ArrayList<>()};
         for (RowTrack track : tracks.values()) {
-            float y = body + (track.index * 31 + 90 - f.depth) * 3.25f * scale;
-            if (f.mode == GameFeedback.Mode.ACTIVE && y <= tip + 14 * scale && y >= tip - 23 * scale)
+            float y = body + (track.index * 31 + 90 - f.decisionDepth()) * 3.25f * scale;
+            long modeAt=f.modeAt>0?f.modeAt:now;
+            float modeDepth=f.decisionDepth()-f.speed()*(now-modeAt)/1000f;
+            float atMode=body+(track.index*31+90-modeDepth)*3.25f*scale;
+            if (f.mode == GameFeedback.Mode.ACTIVE && atMode <= tip + 14 * scale && atMode >= tip - 23 * scale)
                 track.cleared[lane] = true;
-            for (int l = 0; l < 3; l++) if (track.seen[l] >= 2 && !track.cleared[l])
-                objects[l].add(new ObjectHit(y, false));
+            for (int l = 0; l < 3; l++) if (track.seen[l] >= 2 && !track.cleared[l]) {
+                ObjectHit hit=new ObjectHit(y,false);hit.rowIndex=track.index;objects[l].add(hit);
+            }
         }
         for (List<ObjectHit> hits : objects) hits.sort(Comparator.comparingDouble(t -> t.y));
-        float speed = (float) Math.min(78, 16 + 62 * Math.log1p(f.depth / 5000.0) / Math.log1p(20));
+        float speed = f.speed();
         float velocity = speed * 3.25f * scale;
         ObjectHit here = next(objects[lane], body - 10 * scale);
         float y = here == null ? Float.POSITIVE_INFINITY : here.y;
@@ -102,16 +116,20 @@ final class GameAnalyzer {
         // Start before the leading edge: one capture interval + gesture dispatch
         // + the next 60 Hz collision tick. A late command at the lower edge can
         // miss the entire collision window at deep-layer speed.
-        float startLead = velocity * .20f;
-        float arrivalY = y - velocity * .085f;
+        float startLead = velocity * Math.max(.16f,Math.min(.55f,(f.inputLatencyMs+f.framePeriodMs+30)/1000f));
+        float arrivalY = y - velocity * Math.max(.04f,f.inputLatencyMs/1000f);
         if (f.mode == GameFeedback.Mode.ACTIVE) {
-            if (f.heat >= 55 || y > tip + 30 * scale)
+            RowTrack pending=tracks.get(drillingRow);
+            boolean waitingForRow=pending!=null&&drillingLane==lane&&!pending.cleared[lane];
+            if (f.heat >= 55 || (!waitingForRow && y > tip + 30 * scale))
                 return new Decision(Type.CANCEL, "confirmed DRILL: target cleared/heat guard");
             return Decision.none("confirmed DRILL: clearing object");
         }
         boolean ready = f.mode == GameFeedback.Mode.READY && f.heat < 48;
-        if (ready && y <= tip + 12 * scale + startLead && arrivalY >= tip - 23 * scale)
-            return new Decision(Type.DRILL, here.ore ? "ore in destroy window" : "rock in destroy window");
+        if (ready && y <= tip + 12 * scale + startLead && arrivalY >= tip - 23 * scale) {
+            Decision d=new Decision(Type.DRILL,here.ore?"ore in destroy window":"rock in destroy window");
+            d.rowIndex=here.rowIndex;d.lane=lane;return d;
+        }
 
         if (f.mode == GameFeedback.Mode.COOLING
                 && y > tip + velocity * (f.cooldownSeconds + .15f))
