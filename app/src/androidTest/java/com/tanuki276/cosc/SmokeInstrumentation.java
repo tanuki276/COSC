@@ -45,9 +45,16 @@ public final class SmokeInstrumentation extends Instrumentation {
             SharedPreferences prefs = getTargetContext().getSharedPreferences("cosc", 0);
             long deadline = SystemClock.uptimeMillis() + 150000;
             int maxDepth = 0, activeFrames = 0;
+            long lastReport = 0;
             while (SystemClock.uptimeMillis() < deadline) {
                 maxDepth = Math.max(maxDepth, prefs.getInt("observed_depth", 0));
                 activeFrames = Math.max(activeFrames, prefs.getInt("confirmed_drill_frames", 0));
+                if (SystemClock.uptimeMillis() - lastReport > 10000) {
+                    Bundle report = new Bundle();
+                    report.putString("stream", "SMOKE_PROGRESS depth=" + maxDepth + " activeFrames=" + activeFrames
+                            + " status=" + prefs.getString("status", "") + "\n");
+                    sendStatus(0, report); lastReport = SystemClock.uptimeMillis();
+                }
                 if (maxDepth >= 600 && activeFrames > 0) break;
                 SystemClock.sleep(1000);
             }
