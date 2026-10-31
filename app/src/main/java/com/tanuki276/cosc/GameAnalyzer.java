@@ -24,6 +24,7 @@ final class GameAnalyzer {
             0x382840,0x401c17,0x0f2529,0x2f1530};
     private static final int[] ORE = {0x9ba6b2,0xd77c52,0xccd8e4,0xf4c542,
             0xc07cff,0xff5e47,0x54f7e8,0xff62dc};
+    private static final int[] PICKUPS = {0xffd166,0x67e8a5,0x64d8ff,0xffb86b,0xd28cff};
     static final class ObjectHit {
         final float y;
         final boolean ore;
@@ -126,27 +127,35 @@ final class GameAnalyzer {
                 int r = 0, o = 0;
                 if (y < end) for (int x = x0; x < x1; x += 2) {
                     int c = pixels[y * pixelWidth + x];
-                    if (matches(c, ROCK)) r++;
-                    else if (matches(c, ORE)) o++;
+                    if (matches(c, ROCK, 12)) r++;
+                    else if (matches(c, ORE, 8)) o++;
                 }
                 if (r + o >= Math.max(2, (x1 - x0) / 12)) {
                     if (first < 0) first = y;
                     last = y; rock += r; ore += o;
                 }
                 if (first >= 0 && (y - last > Math.max(2, 4 * scale) || y == end)) {
-                    if (last - first >= Math.max(5, 22 * scale))
-                        out[lane].add(new ObjectHit((first + last) * .5f, ore > rock));
+                    if (last - first >= Math.max(5, 22 * scale)) {
+                        int pickupPixels = 0;
+                        int middle = (first + last) / 2;
+                        for (int yy = Math.max(first, Math.round(middle - 10 * scale));
+                             yy <= Math.min(last, middle + 10 * scale); yy++)
+                            for (int xx = x0; xx < x1; xx++)
+                                if (matches(pixels[yy * pixelWidth + xx], PICKUPS, 8)) pickupPixels++;
+                        if (pickupPixels < Math.max(4, 8 * scale * scale))
+                            out[lane].add(new ObjectHit((first + last) * .5f, ore > rock));
+                    }
                     first = -1; rock = 0; ore = 0;
                 }
             }
         }
         return out;
     }
-    private boolean matches(int c, int[] palette) {
+    private boolean matches(int c, int[] palette, int tolerance) {
         for (int p : palette)
-            if (Math.abs(Color.red(c) - ((p >> 16) & 255)) <= 4
-                    && Math.abs(Color.green(c) - ((p >> 8) & 255)) <= 4
-                    && Math.abs(Color.blue(c) - (p & 255)) <= 4) return true;
+            if (Math.abs(Color.red(c) - ((p >> 16) & 255)) <= tolerance
+                    && Math.abs(Color.green(c) - ((p >> 8) & 255)) <= tolerance
+                    && Math.abs(Color.blue(c) - (p & 255)) <= tolerance) return true;
         return false;
     }
     private int detectPlayer(Bitmap b, float s) {

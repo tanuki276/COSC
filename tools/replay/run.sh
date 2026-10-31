@@ -8,4 +8,5 @@ javac -d "$TASK_BUILD" "$TASK_ROOT"/tools/replay/stubs/android/graphics/*.java \
  "$TASK_ROOT"/app/src/main/java/com/tanuki276/cosc/GameAnalyzer.java \
  "$TASK_ROOT"/app/src/main/java/com/tanuki276/cosc/GameFeedback.java \
  "$TASK_ROOT"/tools/replay/ReplayBridge.java
+node "$TASK_ROOT/tools/replay/replay.cjs" "$TASK_GAME" "$TASK_BUILD" fixtures
 node "$TASK_ROOT/tools/replay/replay.cjs" "$TASK_GAME" "$TASK_BUILD"

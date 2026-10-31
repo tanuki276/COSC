@@ -38,7 +38,7 @@ function world(seed,w=360,h=780){
  render,
  upgrade:()=>{if(upgradeOverlay.classList.contains('hidden'))return false;const scores=t=>t.includes('冷却フィン')?100:t.includes('高速クラッチ')?95:t.includes('現地修理')?90:t.includes('増設フレーム')?80:t.includes('ロングビット')?70:t.includes('補給パック')?60:t.includes('高トルクモーター')?50:t.includes('鉱石粉砕ヘッド')?40:30;
  const buttons=upgradeChoices.children;buttons.sort((a,b)=>scores(b.innerHTML)-scores(a.innerHTML));buttons[0].onclick();return true;},
- threats:()=>rows.filter(r=>r.cells[currentLane]&&!r.resolved[currentLane]&&rowY(r)<playerY()+170&&rowY(r)>playerY()-30).map(r=>({y:rowY(r),id:r.cells[currentLane],lane:currentLane})),ready:()=>runPromise};`;
+ fixture:(id)=>{rows.length=0;rows.push({depth:depth+(328-playerY())/3.25,cells:[null,id,null],resolved:[false,false,false]});render();},threats:()=>rows.filter(r=>r.cells[currentLane]&&!r.resolved[currentLane]&&rowY(r)<playerY()+170&&rowY(r)>playerY()-30).map(r=>({y:rowY(r),id:r.cells[currentLane],lane:currentLane})),ready:()=>runPromise};`;
  source=source.replace(/\}\)\(\);\s*$/,exports+'})();');
  vm.runInContext(source,sandbox,{filename:'original-game.js'});
  canvas.width=180;canvas.height=390;canvas.getContext("2d").scale(.5,.5);
@@ -50,6 +50,19 @@ async function main(){
  const lines=readline.createInterface({input:proc.stdout});const iterator=lines[Symbol.asyncIterator]();
  async function ask(line){proc.stdin.write(line+'\n');return (await iterator.next()).value;}
  const results=[];fs.mkdirSync('replay-output',{recursive:true});
+ if(process.argv[4]==='fixtures'){
+  const {g,canvas}=world(1);g.start();await g.ready();
+  for(const id of ['rock','shale','granite','basalt','crystalRock','magmaRock','voidRock','errorRock','iron','copper','silver','gold','amethyst','infernite','voidCrystal','errorShard','point','repair','battery','shield','cache','prototype']){
+   g.fixture(id);const rgba=canvas.getContext('2d').getImageData(0,0,180,390).data;
+   const bgra=Buffer.from(rgba);for(let i=0;i<bgra.length;i+=4){bgra[i]=rgba[i+2];bgra[i+2]=rgba[i];}
+   const answer=await ask(`180 390 1 READY 21 10000 0 10000 0.5 ${zlib.deflateSync(bgra,{level:1}).toString('base64')} 0`);
+   console.log(id,answer);
+   const pickup=['point','repair','battery','shield','cache','prototype'].includes(id);
+   if(answer.split(' ')[0] !== (pickup?'NONE':'DRILL'))throw Error('Renderer fixture failed: '+id+' '+answer);
+   await fs.promises.writeFile(`replay-output/fixture-${id}.png`,await canvas.toBuffer('image/png'));
+  }
+  proc.stdin.end();return;
+ }
  for(const seed of (process.env.REPLAY_SEEDS||'1,42,276').split(',').map(Number)){
   const {g,canvas}=world(seed);g.start();await g.ready();await ask('RESET');
   let trace=[],lastHp=3,queued=[],estimatedLane=1;
