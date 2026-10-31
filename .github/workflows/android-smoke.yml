@@ -1,0 +1,57 @@
+name: Android HUD and gesture smoke
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: tanuki276/co-dugapk
+          ref: 267b0b54eb687cf74daedfbee62f1bc216030d5c
+          path: .smoke-game
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build controller, test driver and unmodified target
+        run: |
+          gradle assembleDebug assembleDebugAndroidTest --stacktrace
+          gradle -p .smoke-game assembleDebug --stacktrace
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_4
+          disable-animations: true
+          script: |
+            adb install -r .smoke-game/app/build/outputs/apk/debug/app-debug.apk
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            adb shell pm grant com.tanuki276.cosc android.permission.POST_NOTIFICATIONS
+            adb shell settings put secure enabled_accessibility_services com.tanuki276.cosc/.GameAccessService
+            adb shell settings put secure accessibility_enabled 1
+            adb shell am instrument -w com.tanuki276.cosc.test/com.tanuki276.cosc.SmokeInstrumentation | tee smoke-result.txt
+            adb exec-out screencap -p > smoke-screen.png
+            adb logcat -d -s AndroidRuntime > smoke-crashes.txt
+            grep -q SMOKE_OK smoke-result.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-smoke-evidence
+          path: |
+            smoke-result.txt
+            smoke-screen.png
+            smoke-crashes.txt

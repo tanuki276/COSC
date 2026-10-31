@@ -60,6 +60,8 @@ public final class AutoService extends Service {
     private int densityDpi;
     private float densityScale;
     private int currentLane = 1;
+    private int observedDepth;
+    private int confirmedDrillFrames;
     private long lastMoveAt;
     private long lastDrillAt;
     private long lastStatusAt;
@@ -98,6 +100,8 @@ public final class AutoService extends Service {
         firstFrameSeen.set(false);
         analyzer.reset();
         currentLane = 1;
+        observedDepth = 0;
+        confirmedDrillFrames = 0;
         lastMoveAt = 0;
         lastOverlayTapAt = 0;
         launchTargetDirect();
@@ -198,6 +202,8 @@ public final class AutoService extends Service {
             if (access == null) throw new IllegalStateException("Enable COSC Accessibility feedback");
             GameFeedback feedback = access.read();
             if (!feedback.targetVisible) return;
+            observedDepth = feedback.depth;
+            if (feedback.mode == GameFeedback.Mode.ACTIVE) confirmedDrillFrames++;
             if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
                 lastOverlayTapAt = now;
                 lastDrillAt = now;
@@ -361,6 +367,8 @@ public final class AutoService extends Service {
         getSharedPreferences("cosc", MODE_PRIVATE)
                 .edit()
                 .putBoolean("running", running.get())
+                .putInt("observed_depth", observedDepth)
+                .putInt("confirmed_drill_frames", confirmedDrillFrames)
                 .putString("status", text)
                 .apply();
         getSystemService(NotificationManager.class)
