@@ -5,53 +5,81 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.BroadcastReceiver;
-import android.content.Context;
+import android.content.ComponentName;
 import android.content.Intent;
-import android.content.IntentFilter;
+import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.SystemClock;
+import android.util.DisplayMetrics;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import rikka.shizuku.Shizuku;
 
 public final class AutoService extends Service {
     public static final String ACTION_START = "com.tanuki276.cosc.START";
     public static final String ACTION_STOP = "com.tanuki276.cosc.STOP";
+    public static final String EXTRA_RESULT_CODE = "result_code";
+    public static final String EXTRA_RESULT_DATA = "result_data";
+
     private static final String TARGET = "com.tanuki276.codug";
-    private static final String CONTROL = "com.tanuki276.codug.COSC_CONTROL";
-    private static final String STATE = "com.tanuki276.cosc.CODUG_STATE";
     private static final String CHANNEL = "cosc_auto";
     private static final int NOTIFICATION_ID = 276;
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private volatile String latestState = "";
-    private volatile long latestStateAt = 0;
-    private long lastActionAt = 0;
-    private long lastStatusAt = 0;
-    private String lastProcessed = "";
+    private final AtomicBoolean processingFrame = new AtomicBoolean(false);
+    private final GameAnalyzer analyzer = new GameAnalyzer();
 
-    private final BroadcastReceiver stateReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
-            String state = intent.getStringExtra("state");
-            if (state == null || state.length() > 64_000) return;
-            latestState = state;
-            latestStateAt = System.currentTimeMillis();
+    private HandlerThread captureThread;
+    private Handler captureHandler;
+    private ImageReader imageReader;
+    private MediaProjection projection;
+    private VirtualDisplay virtualDisplay;
+
+    private volatile ICoscService shell;
+    private int displayWidth;
+    private int displayHeight;
+    private int densityDpi;
+    private float densityScale;
+    private int currentLane = 1;
+    private long lastMoveAt;
+    private long lastDrillAt;
+    private long drillStartedAt;
+    private long lastStatusAt;
+    private boolean drillActive;
+
+    private final Shizuku.UserServiceArgs userServiceArgs =
+            new Shizuku.UserServiceArgs(new ComponentName("com.tanuki276.cosc", ShellService.class.getName()))
+                    .daemon(false)
+                    .processNameSuffix("shell")
+                    .debuggable(BuildConfig.DEBUG)
+                    .version(BuildConfig.VERSION_CODE);
+
+    private final ServiceConnection connection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            shell = ICoscService.Stub.asInterface(binder);
+            try { shell.launchTarget(); } catch (Throwable ignored) {}
         }
+        @Override public void onServiceDisconnected(ComponentName name) { shell = null; }
     };
 
     @Override
     public void onCreate() {
         super.onCreate();
         createChannel();
-        IntentFilter filter = new IntentFilter(STATE);
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(stateReceiver, filter, Context.RECEIVER_EXPORTED);
-        else registerReceiver(stateReceiver, filter);
     }
 
     @Override
@@ -61,224 +89,179 @@ public final class AutoService extends Service {
             stopAutomation();
             return START_NOT_STICKY;
         }
-        startForeground(NOTIFICATION_ID, buildNotification("Starting direct controller…"));
-        if (running.compareAndSet(false, true)) executor.execute(this::runController);
-        return START_STICKY;
+        if (intent == null) return START_NOT_STICKY;
+
+        int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
+        Intent resultData = Build.VERSION.SDK_INT >= 33
+                ? intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent.class)
+                : intent.getParcelableExtra(EXTRA_RESULT_DATA);
+        if (resultCode == 0 || resultData == null) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        startForeground(NOTIFICATION_ID, buildNotification("Starting external capture…"));
+        if (running.compareAndSet(false, true)) startController(resultCode, resultData);
+        return START_NOT_STICKY;
     }
 
-    private void runController() {
+    private void startController(int resultCode, Intent resultData) {
         try {
-            launchTarget();
-            sleep(220);
-            send("safe-mode");
-            send("state");
-            notifyText("DIRECT · waiting for CO-DUG state");
-
-            long deadline = System.currentTimeMillis() + 3500;
-            while (running.get() && latestStateAt == 0 && System.currentTimeMillis() < deadline) {
-                send("state");
-                sleep(80);
+            if (!Shizuku.pingBinder() || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                throw new IllegalStateException("Shizuku permission is required");
             }
-            if (latestStateAt == 0) throw new IllegalStateException("CO-DUG bridge unavailable. Update CO-DUG APK too.");
+            Shizuku.bindUserService(userServiceArgs, connection);
 
-            while (running.get()) {
-                long now = System.currentTimeMillis();
-                if (now - latestStateAt > 800) {
-                    send("state");
-                    if (now - latestStateAt > 2200) launchTarget();
-                    sleep(60);
-                    continue;
-                }
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            displayWidth = dm.widthPixels;
+            displayHeight = dm.heightPixels;
+            densityDpi = dm.densityDpi;
+            densityScale = dm.density;
 
-                String raw = latestState;
-                if (raw.equals(lastProcessed)) { sleep(18); continue; }
-                lastProcessed = raw;
+            captureThread = new HandlerThread("cosc-capture", Thread.MAX_PRIORITY);
+            captureThread.start();
+            captureHandler = new Handler(captureThread.getLooper());
 
-                JSONObject s = new JSONObject(raw);
-                Plan p = plan(s);
-                if (p.action != null && now - lastActionAt >= p.minGapMs) {
-                    send(p.action);
-                    lastActionAt = now;
-                }
+            MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
+            projection = mpm.getMediaProjection(resultCode, resultData);
+            imageReader = ImageReader.newInstance(displayWidth, displayHeight, PixelFormat.RGBA_8888, 3);
+            imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
+            virtualDisplay = projection.createVirtualDisplay(
+                    "COSC-capture",
+                    displayWidth,
+                    displayHeight,
+                    densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    imageReader.getSurface(),
+                    null,
+                    captureHandler
+            );
+            projection.registerCallback(new MediaProjection.Callback() {
+                @Override public void onStop() { stopAutomation(); }
+            }, captureHandler);
 
-                if (p.urgent || now - lastStatusAt > 650) {
-                    int lane = s.optInt("currentLane", 1) + 1;
-                    int depth = (int) s.optDouble("depth", 0);
-                    int hp = s.optInt("hp", 0);
-                    int maxHp = s.optInt("maxHp", 0);
-                    int heat = (int) Math.round(s.optDouble("drillHeat", 0) * 100);
-                    notifyText("DIRECT · " + depth + "m · L" + lane + " · HP " + hp + "/" + maxHp + " · H" + heat + "% · " + p.reason);
-                    lastStatusAt = now;
-                }
-                sleep(p.urgent ? 12 : 24);
-            }
+            launchTargetDirect();
+            notifyText("VISION · waiting for first frame");
         } catch (Throwable e) {
-            notifyText("Stopped: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
-            getSharedPreferences("cosc", MODE_PRIVATE).edit().putString("last_error", String.valueOf(e)).apply();
-            sleep(700);
-        } finally {
+            notifyText("Stopped: " + message(e));
             stopAutomation();
         }
     }
 
-    private Plan plan(JSONObject s) {
-        if (s.optBoolean("gameover") || s.optBoolean("gameoverVisible")) return Plan.action("retry", "retry", true, 180);
-        if (s.optBoolean("upgradeVisible")) return Plan.action("upgrade", "upgrade", true, 120);
-        if (s.optBoolean("introVisible") || !s.optBoolean("started")) return Plan.action("start", "start", true, 140);
-        if (s.optBoolean("paused") || s.optBoolean("manualPause")) return Plan.action("resume", "resume", true, 120);
-        if (s.optBoolean("sessionStarting")) return Plan.none("session", false);
-
-        int lane = clamp(s.optInt("currentLane", 1), 0, 2);
-        double heat = s.optDouble("drillHeat", 0);
-        double drill = s.optDouble("drill", 0);
-        boolean drillReady = s.optBoolean("drillReady");
-        double moveCooldown = s.optDouble("moveCooldown", 0);
-        int hp = s.optInt("hp", 3), maxHp = s.optInt("maxHp", 3);
-        JSONArray rows = s.optJSONArray("upcoming");
-        if (rows == null || rows.length() == 0) {
-            if (drill > 0) return Plan.action("drill", "stop idle drill", true, 70);
-            return Plan.none("clear", false);
+    private void onImageAvailable(ImageReader reader) {
+        if (!running.get()) return;
+        Image image = reader.acquireLatestImage();
+        if (image == null) return;
+        if (!processingFrame.compareAndSet(false, true)) {
+            image.close();
+            return;
         }
 
-        JSONObject barrier = null;
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject r = rows.optJSONObject(i);
-            if (r != null && r.optBoolean("barrier") && r.optDouble("distance", 999) < 70) { barrier = r; break; }
-        }
-        if (barrier != null) {
-            int target = bestBarrierLane(barrier);
-            double d = barrier.optDouble("distance", 999);
-            if (lane != target && moveCooldown <= 0.001 && d > 5) {
-                return Plan.action(target < lane ? "left" : "right", "align barrier L" + (target + 1), d < 38, 125);
+        Bitmap frame = null;
+        Bitmap scaled = null;
+        try {
+            frame = imageToBitmap(image);
+            if (frame == null) return;
+
+            int targetWidth = Math.min(720, frame.getWidth());
+            int targetHeight = Math.max(1, Math.round(frame.getHeight() * (targetWidth / (float) frame.getWidth())));
+            scaled = frame.getWidth() == targetWidth ? frame : Bitmap.createScaledBitmap(frame, targetWidth, targetHeight, false);
+
+            float captureScale = scaled.getWidth() / (float) Math.max(1, displayWidth);
+            float frameDensity = Math.max(0.5f, densityScale * captureScale);
+            long now = SystemClock.uptimeMillis();
+            GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, now - lastDrillAt);
+            applyDecision(decision, now);
+
+            if (decision.urgent || now - lastStatusAt > 650) {
+                notifyText("VISION · L" + (currentLane + 1) + (drillActive ? " · DRILL" : "") + " · " + decision.reason);
+                lastStatusAt = now;
             }
-            if (lane == target && d <= 29) {
-                if (drill <= 0 && drillReady && heat < 0.88) return Plan.action("drill", "break barrier", true, 70);
-                if (drill > 0 && d < -1) return Plan.action("drill", "stop barrier drill", true, 60);
-                return Plan.none("barrier heat " + pct(heat), true);
+        } catch (Throwable e) {
+            if (SystemClock.uptimeMillis() - lastStatusAt > 1000) {
+                notifyText("frame error: " + message(e));
+                lastStatusAt = SystemClock.uptimeMillis();
             }
+        } finally {
+            if (scaled != null && scaled != frame) scaled.recycle();
+            if (frame != null) frame.recycle();
+            image.close();
+            processingFrame.set(false);
         }
+    }
 
-        JSONObject first = firstRelevant(rows);
-        if (first != null) {
-            double d = first.optDouble("distance", 999);
-            JSONObject here = cell(first, lane);
-            if (here != null) {
-                String kind = here.optString("kind");
-                if (("rock".equals(kind) || "ore".equals(kind)) && d <= 31) {
-                    int safe = safestLaneForRow(first, lane, heat, hp, maxHp);
-                    boolean canDrill = drillReady && heat < ("ore".equals(kind) ? 0.78 : 0.72);
-                    if (drill > 0) {
-                        if (d < -1 || here == null) return Plan.action("drill", "stop drill", true, 55);
-                        return Plan.none("drilling " + kind, true);
-                    }
-                    if (safe != lane && moveCooldown <= 0.001 && !first.optBoolean("barrier")) {
-                        return Plan.action(safe < lane ? "left" : "right", "evade " + kind + " -> L" + (safe + 1), true, 120);
-                    }
-                    if (canDrill && d <= 26) return Plan.action("drill", "drill " + kind, true, 65);
+    private void applyDecision(GameAnalyzer.Decision d, long now) throws Exception {
+        ICoscService s = shell;
+        if (s == null) return;
+
+        if (drillActive) {
+            long activeFor = now - drillStartedAt;
+            boolean keepDrilling = d.type == GameAnalyzer.Type.DRILL;
+            // Second press cancels the active drill. Do it as soon as the target is gone,
+            // or cap the pulse so we never sit in a long heat-producing drill cycle.
+            if ((activeFor >= 55 && !keepDrilling) || activeFor >= 145) {
+                if (s.keyEvent(62) == 0) {
+                    drillActive = false;
+                    lastDrillAt = now;
                 }
-            } else if (drill > 0) {
-                return Plan.action("drill", "stop empty drill", true, 55);
             }
+            // Never side-step while the drill is physically active; cancel first and let the
+            // next frame decide the move. This prevents "move toward ore and miss it" behavior.
+            return;
         }
 
-        int best = bestLane(rows, lane, heat, hp, maxHp);
-        double currentScore = laneScore(rows, lane, heat, hp, maxHp);
-        double bestScore = laneScore(rows, best, heat, hp, maxHp);
-        if (best != lane && moveCooldown <= 0.001 && bestScore + 2.2 < currentScore) {
-            return Plan.action(best < lane ? "left" : "right", "route L" + (best + 1), false, 125);
+        switch (d.type) {
+            case DRILL -> {
+                if (now - lastDrillAt < 120) return;
+                if (s.keyEvent(62) == 0) {
+                    drillActive = true;
+                    drillStartedAt = now;
+                    lastDrillAt = now;
+                }
+            }
+            case LEFT -> move(-1, d.urgent, now, s);
+            case RIGHT -> move(1, d.urgent, now, s);
+            case TAP -> {
+                int x = Math.round(d.xNorm * displayWidth);
+                int y = Math.round(d.yNorm * displayHeight);
+                if (s.tap(x, y) == 0) currentLane = 1;
+            }
+            case NONE -> { }
         }
-        if (drill > 0) return Plan.action("drill", "stop drill", true, 55);
-        return Plan.none("hold L" + (lane + 1), false);
     }
 
-    private JSONObject firstRelevant(JSONArray rows) {
-        JSONObject best = null;
-        double distance = Double.MAX_VALUE;
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject r = rows.optJSONObject(i);
-            if (r == null) continue;
-            double d = r.optDouble("distance", 999);
-            if (d >= -2 && d < distance) { distance = d; best = r; }
+    private void move(int direction, boolean urgent, long now, ICoscService s) throws Exception {
+        long minGap = urgent ? 138 : 150;
+        if (now - lastMoveAt < minGap) return;
+        int next = Math.max(0, Math.min(2, currentLane + Integer.signum(direction)));
+        if (next == currentLane) return;
+        if (s.keyEvent(direction < 0 ? 21 : 22) == 0) {
+            currentLane = next;
+            lastMoveAt = now;
         }
-        return best;
     }
 
-    private int bestBarrierLane(JSONObject row) {
-        JSONArray cells = row.optJSONArray("cells");
-        if (cells != null) for (int l = 0; l < 3; l++) {
-            JSONObject c = cells.optJSONObject(l);
-            if (c != null && "ore".equals(c.optString("kind"))) return l;
-        }
-        return 1;
+    private Bitmap imageToBitmap(Image image) {
+        Image.Plane[] planes = image.getPlanes();
+        if (planes.length == 0) return null;
+        Image.Plane plane = planes[0];
+        ByteBuffer buffer = plane.getBuffer();
+        int pixelStride = plane.getPixelStride();
+        int rowStride = plane.getRowStride();
+        int rowPadding = rowStride - pixelStride * image.getWidth();
+        int paddedWidth = image.getWidth() + rowPadding / Math.max(1, pixelStride);
+        Bitmap padded = Bitmap.createBitmap(paddedWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
+        padded.copyPixelsFromBuffer(buffer);
+        if (paddedWidth == image.getWidth()) return padded;
+        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, image.getWidth(), image.getHeight());
+        padded.recycle();
+        return cropped;
     }
 
-    private int safestLaneForRow(JSONObject row, int current, double heat, int hp, int maxHp) {
-        int best = current;
-        double score = Double.MAX_VALUE;
-        for (int l = 0; l < 3; l++) {
-            JSONObject c = cell(row, l);
-            double s = cellCost(c, heat, hp, maxHp) + Math.abs(l - current) * 0.8;
-            if (s < score) { score = s; best = l; }
-        }
-        return best;
-    }
-
-    private int bestLane(JSONArray rows, int current, double heat, int hp, int maxHp) {
-        int best = current;
-        double bestScore = laneScore(rows, current, heat, hp, maxHp);
-        for (int l = 0; l < 3; l++) {
-            double s = laneScore(rows, l, heat, hp, maxHp) + Math.abs(l - current) * 1.2;
-            if (s < bestScore) { bestScore = s; best = l; }
-        }
-        return best;
-    }
-
-    private double laneScore(JSONArray rows, int lane, double heat, int hp, int maxHp) {
-        double score = 0;
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject r = rows.optJSONObject(i);
-            if (r == null) continue;
-            double d = r.optDouble("distance", 999);
-            if (d < -2 || d > 95) continue;
-            double weight = 1.0 / (1.0 + d / 24.0);
-            JSONObject c = cell(r, lane);
-            double cost = cellCost(c, heat, hp, maxHp);
-            if (r.optBoolean("barrier")) cost *= 0.7;
-            score += cost * weight;
-        }
-        return score;
-    }
-
-    private double cellCost(JSONObject c, double heat, int hp, int maxHp) {
-        if (c == null) return 0;
-        String kind = c.optString("kind");
-        if ("rock".equals(kind)) return (12 + c.optInt("damage", 1) * 10) * (heat > 0.68 ? 1.6 : 1.0);
-        if ("ore".equals(kind)) return heat < 0.62 ? -5.5 : 7.0;
-        if ("point".equals(kind)) return -1.8;
-        if ("item".equals(kind)) {
-            String effect = c.optString("effect");
-            if ("repair".equals(effect)) return hp < maxHp ? -18 : -2;
-            if ("battery".equals(effect)) return heat > 0.30 ? -20 : -4;
-            if ("shield".equals(effect)) return -11;
-            if ("prototype".equals(effect)) return -9;
-            if ("cache".equals(effect)) return -3;
-        }
-        return 0;
-    }
-
-    private JSONObject cell(JSONObject row, int lane) {
-        JSONArray cells = row.optJSONArray("cells");
-        return cells == null ? null : cells.optJSONObject(lane);
-    }
-
-    private void launchTarget() {
-        Intent i = new Intent().setClassName(TARGET, TARGET + ".MainActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    private void launchTargetDirect() {
+        Intent i = new Intent().setClassName(TARGET, TARGET + ".MainActivity")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         try { startActivity(i); } catch (Throwable ignored) {}
-    }
-
-    private void send(String action) {
-        Intent i = new Intent(CONTROL).setPackage(TARGET).putExtra("action", action);
-        sendBroadcast(i);
     }
 
     private void stopAutomation() {
@@ -287,6 +270,21 @@ public final class AutoService extends Service {
             stopSelf();
             return;
         }
+        try {
+            if (drillActive && shell != null) shell.keyEvent(62);
+        } catch (Throwable ignored) {}
+        drillActive = false;
+        try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}
+        try { if (virtualDisplay != null) virtualDisplay.release(); } catch (Throwable ignored) {}
+        try { if (projection != null) projection.stop(); } catch (Throwable ignored) {}
+        try { Shizuku.unbindUserService(userServiceArgs, connection, true); } catch (Throwable ignored) {}
+        imageReader = null;
+        virtualDisplay = null;
+        projection = null;
+        shell = null;
+        if (captureThread != null) captureThread.quitSafely();
+        captureThread = null;
+        captureHandler = null;
         getSharedPreferences("cosc", MODE_PRIVATE).edit().putBoolean("running", false).apply();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
@@ -304,7 +302,7 @@ public final class AutoService extends Service {
         PendingIntent openPi = PendingIntent.getActivity(this, 2, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("COSC · direct autopilot")
+                .setContentTitle("COSC · external autopilot")
                 .setContentText(text)
                 .setContentIntent(openPi)
                 .setOnlyAlertOnce(true)
@@ -318,28 +316,16 @@ public final class AutoService extends Service {
         getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildNotification(text));
     }
 
-    private static String pct(double v) { return Math.round(v * 100) + "%"; }
-    private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
-    private static void sleep(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
+    private static String message(Throwable e) {
+        String m = e.getMessage();
+        return m == null || m.isEmpty() ? e.getClass().getSimpleName() : m;
+    }
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
     @Override
     public void onDestroy() {
-        running.set(false);
-        executor.shutdownNow();
-        try { unregisterReceiver(stateReceiver); } catch (Throwable ignored) {}
+        stopAutomation();
         super.onDestroy();
-    }
-
-    private static final class Plan {
-        final String action, reason;
-        final boolean urgent;
-        final long minGapMs;
-        Plan(String action, String reason, boolean urgent, long minGapMs) {
-            this.action = action; this.reason = reason; this.urgent = urgent; this.minGapMs = minGapMs;
-        }
-        static Plan action(String action, String reason, boolean urgent, long minGapMs) { return new Plan(action, reason, urgent, minGapMs); }
-        static Plan none(String reason, boolean urgent) { return new Plan(null, reason, urgent, 0); }
     }
 }
