@@ -8,11 +8,11 @@ import android.app.Service;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.RemoteException;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -89,12 +89,21 @@ public final class AutoService extends Service {
                 Bitmap frame = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
                 if (frame == null) { sleep(300); continue; }
 
+                // wm size is reported in natural orientation on some devices. Match it to the
+                // actual screenshot before translating normalized tap coordinates.
+                boolean frameLandscape = frame.getWidth() > frame.getHeight();
+                boolean displayLandscape = physicalWidth > physicalHeight;
+                if (frameLandscape != displayLandscape) {
+                    int swap = physicalWidth;
+                    physicalWidth = physicalHeight;
+                    physicalHeight = swap;
+                }
+
                 // Density must be scaled to match the downsampled screenshot.
                 float captureScale = physicalWidth > 0 ? frame.getWidth() / (float) physicalWidth : 1f;
                 float frameDensity = Math.max(1f, densityScale * captureScale);
                 GameAnalyzer.Decision d = analyzer.analyze(frame, currentLane, frameDensity,
                         System.currentTimeMillis() - lastDrillAt);
-                int fw = frame.getWidth(), fh = frame.getHeight();
                 frame.recycle();
 
                 switch (d.type) {
@@ -130,7 +139,7 @@ public final class AutoService extends Service {
         long deadline = System.currentTimeMillis() + 5000;
         while (running.get() && System.currentTimeMillis() < deadline) {
             try {
-                if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == getPackageManager().PERMISSION_GRANTED) return true;
+                if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) return true;
             } catch (Throwable ignored) {}
             sleep(150);
         }
