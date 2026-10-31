@@ -1,65 +1,54 @@
 # COSC
 
-CO-DUG Offline Smart Controller.
+External controller for the unmodified offline CO-DUG Android app
+(`com.tanuki276.codug`). Requires Android 8.0 or later.
 
-Android controller for the local/offline `tanuki276/co-dugapk` build.
+## Install and run
 
-## What it does
+1. Install the COSC debug APK from the latest successful **Build COSC APK** run.
+2. In Android Settings → Accessibility, enable **COSC**. If Android blocks a
+   sideloaded accessibility service, open COSC's App info → menu → Allow
+   restricted settings, then return to Accessibility.
+3. Open COSC and choose **Start external auto**; allow full-screen capture.
+4. Keep CO-DUG in portrait orientation. Stop AUTO before rotating the device.
+5. Stop with the notification action or **Stop auto** in COSC.
 
-- Connects to Shizuku with the official UserService API.
-- Launches `com.tanuki276.codug`.
-- Captures the full display with MediaProjection (Shizuku is used for input).
-- Scans the three CO-DUG lanes for nearby large objects.
-- Taps the CO-DUG touch controls to dodge or drill.
-- Runs as a foreground service with a persistent notification.
+Shizuku is not required by version 0.2. The earlier shell-per-touch path has been
+replaced by Android accessibility gestures. Screen capture detects the canvas;
+accessibility reads visible HUD text and menu buttons. No game memory, save-file
+editing, APK patching, or injection into CO-DUG is used.
 
-This repository is intentionally scoped to the CO-DUG app package and is not a generic game automation tool.
+## Controller
 
-## Requirements
+- Detects all eight rock fill palettes, including dark basalt/void/error stone.
+- Detects individual rock/ore centers rather than aggregate pixel percentages.
+- Uses CO-DUG's real 39 CSS pixel drill collision window and an input lead time.
+- Starts a drill only when the visible HUD says READY and the heat stage permits.
+- Cancels only when the visible HUD confirms an active drill; waits for actual
+  cooldown feedback rather than an assumed fixed timeout.
+- Checks neighboring lanes down to the body contact zone before moving.
+- Chooses actual accessible upgrade buttons, prioritizing cooling and cooldown.
+- Turns the x2 accelerator off through its visible button before normal control.
+- Restricts gestures and HUD reads to CO-DUG's foreground package.
 
-- Android 8.0+ (minSdk 26)
-- Shizuku running and permission granted to COSC
-- CO-DUG installed as `com.tanuki276.codug`
+## Build and verification
 
-## Build
-
-```bash
+```sh
 gradle testDebugUnitTest assembleDebug
 ```
 
-The GitHub Actions workflow also publishes `app-debug.apk` as an artifact.
+The **Original CO-DUG 100000m replay** workflow checks out CO-DUG at the fixed
+commit `267b0b54eb687cf74daedfbee62f1bc216030d5c` into a separate test directory.
+It runs the original row generation, upgrades, collision, heat and update code
+without changing the checkout. Canvas frames from the original rock/ore/player
+renderer are fed to the same Java `GameAnalyzer` shipped in COSC. The Java bridge
+only substitutes pixel storage for Android Bitmap; it does not replace the
+analyzer. Results and end-state images are uploaded as workflow artifacts.
 
-## Usage
+The replay uses a small DOM adapter for menus and structured HUD observations;
+it does not emulate Android accessibility, WebView font rendering, system
+capture permissions or device input scheduling. Replay success alone is not a
+promise of a particular distance on every physical device. Check the exact
+workflow result and seed metrics before interpreting a build as validated.
 
-1. Start Shizuku.
-2. Open COSC.
-3. Tap **Grant Shizuku** and approve it.
-4. Tap **Start auto**.
-5. COSC launches CO-DUG and starts the controller loop.
-6. Use **Stop auto** from COSC or the notification when you want to stop.
-
-## Notes
-
-The lane detector is deliberately conservative: it prioritizes survival, moves away from large nearby blobs when a lane is clear, and drills when no clear path is available. It is an MVP and can be tuned in `GameAnalyzer.java`.
-
-## Compatibility fixes
-
-Target inspected: `tanuki276/co-dugapk` commit `267b0b54eb687cf74daedfbee62f1bc216030d5c`.
-No changes to CO-DUG are required.
-
-- Android 14+ requests the full display, avoiding app-only capture coordinates.
-- Capture uses real display dimensions, including the immersive game area.
-- Yellow button scans use a consistent pixel grid at every screen height.
-- Static frames alone never trigger an upgrade tap; a filled choice card with
-  bright text and a yellow label must be visible.
-- Each new session clears lane and image history.
-- Drill cancellation is limited to before the base 500 ms expiration. Late
-  frames discard the assumed active state without toggling it on again, and
-  use a conservative 1100 ms recovery interval after cancellation.
-
-Screen recognition remains heuristic. The regression tests cover synthetic
-button/card frames, scan parity, and static gameplay. A connected Android device
-with Shizuku is required to verify real WebView rendering, input latency and
-long-run survival. Rotate the device only after stopping AUTO, then start a new
-capture session. Full-screen capture may include other apps; input is guarded
-by the target package foreground check.
+The target repository is read-only throughout this workflow.

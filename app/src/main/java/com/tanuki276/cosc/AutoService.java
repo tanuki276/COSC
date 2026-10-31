@@ -185,7 +185,7 @@ public final class AutoService extends Service {
             frame = imageToBitmap(image);
             if (frame == null) return;
 
-            int targetWidth = Math.min(720, frame.getWidth());
+            int targetWidth = Math.min(480, frame.getWidth());
             int targetHeight = Math.max(1, Math.round(frame.getHeight() * (targetWidth / (float) frame.getWidth())));
             scaled = frame.getWidth() == targetWidth
                     ? frame
@@ -317,9 +317,6 @@ public final class AutoService extends Service {
             stopSelf();
             return;
         }
-        try {
-            // Do not toggle on shutdown: the latest HUD may already show natural expiry.
-        } catch (Throwable ignored) {}
         captureStarted.set(false);
         firstFrameSeen.set(false);
         try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}

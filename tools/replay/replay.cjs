@@ -27,7 +27,7 @@ function world(seed,w=360,h=780){
  const storage=new Map(); const math=Object.create(Math);math.random=rand;
  const sandbox={console,Math:math,document,innerWidth:w,innerHeight:h,devicePixelRatio:1,
  localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,String(v))},
- location:{origin:'null',search:'',hash:''},navigator:{vibrate(){}},matchMedia:()=>({matches:true}),
+ location:{origin:'null',search:'',hash:''},navigator:{vibrate(){}},matchMedia:()=>({matches:false}),
  addEventListener(){},requestAnimationFrame(){},setTimeout(){return 0;},clearTimeout(){},
  MutationObserver:class{observe(){}},performance:{now:()=>0},URL,URLSearchParams,Response,AbortSignal,Date,crypto:require('node:crypto').webcrypto};
  vm.createContext(sandbox);
@@ -35,7 +35,7 @@ function world(seed,w=360,h=780){
  let source=fs.readdirSync(path.join(gameRoot,'source-parts')).filter(f=>/game\.\d+\.js\.part/.test(f)).sort().map(f=>fs.readFileSync(path.join(gameRoot,'source-parts',f),'utf8')).join('');
  const exports=`globalThis.testGame={start,update,moveLane,activateDrill,drawRows,drawDrill,field,
  state:()=>({depth,hp,maxHp,gameover,paused,currentLane,drill,drillHeat,drillCooldown,tipReach,heatGain,heatCoolRate,drillCooldownMax,runSeed,rocks:Object.keys(journal.counts).filter(k=>TYPES[k]?.kind==='rock').reduce((n,k)=>n+(journal.counts[k]||0),0)}),
- render:()=>{ctx.fillStyle=layerFor(depth).sky;ctx.fillRect(0,0,W,H);drawRows();drawDrill();},
+ render,
  upgrade:()=>{if(upgradeOverlay.classList.contains('hidden'))return false;const scores=t=>t.includes('冷却フィン')?100:t.includes('高速クラッチ')?95:t.includes('現地修理')?90:t.includes('増設フレーム')?80:t.includes('ロングビット')?70:t.includes('補給パック')?60:t.includes('高トルクモーター')?50:t.includes('鉱石粉砕ヘッド')?40:30;
  const buttons=upgradeChoices.children;buttons.sort((a,b)=>scores(b.innerHTML)-scores(a.innerHTML));buttons[0].onclick();return true;},
  threats:()=>rows.filter(r=>r.cells[currentLane]&&!r.resolved[currentLane]&&rowY(r)<playerY()+170&&rowY(r)>playerY()-30).map(r=>({y:rowY(r),id:r.cells[currentLane],lane:currentLane})),ready:()=>runPromise};`;
@@ -52,30 +52,43 @@ async function main(){
  const results=[];fs.mkdirSync('replay-output',{recursive:true});
  for(const seed of (process.env.REPLAY_SEEDS||'1,42,276').split(',').map(Number)){
   const {g,canvas}=world(seed);g.start();await g.ready();await ask('RESET');
-  let trace=[],lastHp=3;
+  let trace=[],lastHp=3,queued=[],estimatedLane=1;
   let time=10000,lastDrill=0,lastMove=0,moves=0,drills=0,cancels=0,steps=0;
   const dt=1/12;
   while(g.state().depth<100100&&!g.state().gameover&&steps<60000){
    if(g.upgrade()){};
-   let s=g.state();g.render();
+   let s=g.state();if(steps===0)g.render();
    const rgba=canvas.getContext('2d').getImageData(0,0,180,390).data;
    const bgra=Buffer.alloc(rgba.length);
    for(let i=0;i<rgba.length;i+=4){bgra[i]=rgba[i+2];bgra[i+1]=rgba[i+1];bgra[i+2]=rgba[i];bgra[i+3]=255;}
    const mode=s.drill>0?'ACTIVE':s.drillCooldown>0?'COOLING':'READY';
    const stage=s.drillHeat<.22?21:s.drillHeat<.48?47:s.drillHeat<.72?71:99;
    const heat=s.drill>0?Math.round(s.drillHeat*100):stage;
-   const answer=await ask(`180 390 ${s.currentLane} ${mode} ${heat} ${Math.floor(s.depth)} ${s.tipReach} ${Math.round(time)} 0.5 ${zlib.deflateSync(bgra,{level:1}).toString('base64')}`);
+   const answer=await ask(`180 390 ${estimatedLane} ${mode} ${heat} ${Math.floor(s.depth)} ${s.tipReach} ${Math.round(time)} 0.5 ${zlib.deflateSync(bgra,{level:1}).toString('base64')}`);
    if(!answer)throw Error('bridge exited');
    trace.push({depth:Math.round(s.depth),mode,heat,answer,threats:g.threats()});if(trace.length>12)trace.shift();
    if(s.hp<lastHp)console.log('DAMAGE '+JSON.stringify({seed,trace}));lastHp=s.hp;
    const action=answer.split(' ')[0];
+   const observedLane=Number(answer.split(' ')[1]);
+   if(observedLane>=0&&time-lastMove>280)estimatedLane=observedLane;
    if(time-lastDrill>=160){
-    if(action==='DRILL'||action==='CANCEL'){g.activateDrill();lastDrill=time;action==='DRILL'?drills++:cancels++;}
-    if((action==='LEFT'||action==='RIGHT')&&time-lastMove>=150){g.moveLane(s.currentLane+(action==='LEFT'?-1:1));lastMove=time;moves++;}
+    if(action==='DRILL'||action==='CANCEL'){
+      queued.push({at:time+65,action});lastDrill=time;action==='DRILL'?drills++:cancels++;
+    }
+    if((action==='LEFT'||action==='RIGHT')&&time-lastMove>=150){
+      queued.push({at:time+65,action});estimatedLane=Math.max(0,Math.min(2,estimatedLane+(action==='LEFT'?-1:1)));lastMove=time;moves++;
+    }
    }
-   if(steps%100===0 && steps<2000) console.log(JSON.stringify({seed,steps,action,answer,...s}));
+   if(steps%1000===0 && steps<2000) console.log(JSON.stringify({seed,steps,action,answer,...s}));
    // Advance in original 60 Hz collision/heat steps, not one oversized simulation tick.
-   for(let j=0;j<5;j++)g.update(1/60);
+   for(let j=0;j<5;j++){
+     g.update(1/60);g.render();
+     while(queued.length&&queued[0].at<=time+(j+1)*1000/60){
+       const command=queued.shift().action;
+       if(command==='DRILL'||command==='CANCEL')g.activateDrill();
+       else g.moveLane(g.state().currentLane+(command==='LEFT'?-1:1));
+     }
+   }
    time+=dt*1000;steps++;
    if(steps%5000===0)console.log(JSON.stringify({seed,step:steps,...g.state()}));
   }

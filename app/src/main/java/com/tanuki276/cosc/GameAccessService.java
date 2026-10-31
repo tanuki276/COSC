@@ -37,7 +37,7 @@ public final class GameAccessService extends AccessibilityService {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return f;
         try {
-            if (!TARGET.contentEquals(root.getPackageName())) return f;
+            if (!TARGET.equals(String.valueOf(root.getPackageName()))) return f;
             f.targetVisible = true;
             f.tipReach = tipReach;
             List<AccessibilityNodeInfo> nodes = new ArrayList<>();
@@ -70,14 +70,14 @@ public final class GameAccessService extends AccessibilityService {
         if (root == null) return false;
         List<AccessibilityNodeInfo> nodes = new ArrayList<>();
         try {
-            if (!TARGET.contentEquals(root.getPackageName())) return false;
+            if (!TARGET.equals(String.valueOf(root.getPackageName()))) return false;
             collect(root, nodes);
             AccessibilityNodeInfo best = null;
             int bestScore = 0;
             for (AccessibilityNodeInfo n : nodes) {
                 if (!n.isClickable() || !n.isVisibleToUser()) continue;
                 String text = nodeText(n);
-                int score = text.contains("掘削を開始") || text.equals("もう一回") || text.contains("掘削を再開") ? 200
+                int score = text.contains("x2 ON") ? 210 : text.contains("掘削を開始") || text.equals("もう一回") || text.contains("掘削を再開") ? 200
                         : text.contains("冷却フィン") ? 100
                         : text.contains("現地修理") ? 90
                         : text.contains("増設フレーム") ? 80
@@ -126,7 +126,7 @@ public final class GameAccessService extends AccessibilityService {
         main.post(() -> {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root == null) { done.countDown(); return; }
-            boolean target = TARGET.contentEquals(root.getPackageName());
+            boolean target = TARGET.equals(String.valueOf(root.getPackageName()));
             root.recycle();
             if (!target) { done.countDown(); return; }
             Path path = new Path(); path.moveTo(x, y);

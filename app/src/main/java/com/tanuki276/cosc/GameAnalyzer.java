@@ -29,6 +29,8 @@ final class GameAnalyzer {
         final boolean ore;
         ObjectHit(float y, boolean ore) { this.y = y; this.ore = ore; }
     }
+    private int[] pixels;
+    private int pixelWidth;
     int observedLane = -1;
     void reset() { observedLane = -1; }
 
@@ -42,6 +44,10 @@ final class GameAnalyzer {
             return Decision.none("waiting for target/HUD");
         if (f.mode == GameFeedback.Mode.UNKNOWN || f.mode == GameFeedback.Mode.MENU)
             return Decision.none("waiting for menu/HUD");
+        int size = b.getWidth() * b.getHeight();
+        if (pixels == null || pixels.length != size) pixels = new int[size];
+        pixelWidth = b.getWidth();
+        b.getPixels(pixels, 0, pixelWidth, 0, 0, pixelWidth, b.getHeight());
         scale = Math.max(0.01f, scale);
         observedLane = detectPlayer(b, scale);
         List<ObjectHit>[] objects = detect(b, scale, lane);
@@ -111,7 +117,7 @@ final class GameAnalyzer {
             for (int y = start; y <= end; y++) {
                 int r = 0, o = 0;
                 if (y < end) for (int x = x0; x < x1; x += 2) {
-                    int c = b.getPixel(x, y);
+                    int c = pixels[y * pixelWidth + x];
                     if (matches(c, ROCK)) r++;
                     else if (matches(c, ORE)) o++;
                 }
@@ -143,7 +149,7 @@ final class GameAnalyzer {
             int n = 0;
             for (int y = Math.round(b.getHeight() * .32f - 26 * s); y < b.getHeight() * .32f + 10 * s; y++)
                 for (int x = Math.max(0, Math.round(cx - 39 * s)); x < Math.min(b.getWidth(), cx + 39 * s); x++) {
-                    int c = b.getPixel(x, y);
+                    int c = pixels[y * pixelWidth + x];
                     if (Math.abs(Color.red(c) - 80) < 4 && Math.abs(Color.green(c) - 100) < 4
                             && Math.abs(Color.blue(c) - 119) < 4) n++;
                 }
