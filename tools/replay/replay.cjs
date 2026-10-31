@@ -70,14 +70,15 @@ async function main(){
     if(action==='DRILL'||action==='CANCEL'){g.activateDrill();lastDrill=time;action==='DRILL'?drills++:cancels++;}
     if((action==='LEFT'||action==='RIGHT')&&time-lastMove>=150){g.moveLane(s.currentLane+(action==='LEFT'?-1:1));lastMove=time;moves++;}
    }
+   if(steps%100===0 && steps<2000) console.log(JSON.stringify({seed,steps,action,answer,...s}));
    // Advance in original 60 Hz collision/heat steps, not one oversized simulation tick.
    for(let j=0;j<5;j++)g.update(1/60);
    time+=dt*1000;steps++;
    if(steps%5000===0)console.log(JSON.stringify({seed,step:steps,...g.state()}));
   }
   const result={seed,...g.state(),drills,cancels,moves,frames:steps,simulatedSeconds:Math.round((time-10000)/1000)};results.push(result);
-  await fs.promises.writeFile(`replay-output/seed-${seed}.png`,await canvas.toBuffer('png'));
   console.log('RESULT '+JSON.stringify(result));
+  await fs.promises.writeFile(`replay-output/seed-${seed}.png`,await canvas.toBuffer('image/png'));
  }
  proc.stdin.end();fs.writeFileSync('replay-output/results.json',JSON.stringify(results,null,2));
  if(results.some(r=>r.depth<100000||r.rocks<100))process.exitCode=1;
