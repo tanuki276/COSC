@@ -1,0 +1,2 @@
+-keep class com.tanuki276.cosc.ShellService { *; }
+-keep class com.tanuki276.cosc.ICoscService$Stub { *; }
