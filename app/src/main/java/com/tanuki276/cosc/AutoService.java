@@ -44,6 +44,12 @@ public final class AutoService extends Service {
     private static final int CONTROL_DRILL = 1;
     private static final int CONTROL_RIGHT = 2;
 
+    // A drill activation itself adds heat in CO-DUG. Do not pulse/restart it.
+    private static final long MIN_DRILL_ACTIVE_MS = 80;
+    private static final long MAX_DRILL_ACTIVE_MS = 520;
+    private static final int CLEAR_FRAMES_TO_CANCEL = 2;
+    private static final int CLEAR_FRAMES_TO_REARM = 3;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean processingFrame = new AtomicBoolean(false);
     private final AtomicBoolean captureStarted = new AtomicBoolean(false);
@@ -69,7 +75,11 @@ public final class AutoService extends Service {
     private long lastDrillAt;
     private long drillStartedAt;
     private long lastStatusAt;
+
     private boolean drillActive;
+    private boolean drillRearmBlocked;
+    private int drillClearFrames;
+    private int drillRearmClearFrames;
 
     private final Shizuku.UserServiceArgs userServiceArgs =
             new Shizuku.UserServiceArgs(new ComponentName("com.tanuki276.cosc", ShellService.class.getName()))
@@ -83,8 +93,7 @@ public final class AutoService extends Service {
         public void onServiceConnected(ComponentName name, IBinder binder) {
             shell = ICoscService.Stub.asInterface(binder);
             try {
-                String ping = shell.ping();
-                notifyText("INPUT READY · " + ping);
+                notifyText("INPUT READY · " + shell.ping());
             } catch (Throwable e) {
                 notifyText("Input service connected, ping failed: " + message(e));
             }
@@ -131,6 +140,7 @@ public final class AutoService extends Service {
         pendingResultCode = resultCode;
         pendingResultData = resultData;
         firstFrameSeen.set(false);
+        resetDrillState();
         launchTargetDirect();
 
         try {
@@ -173,9 +183,6 @@ public final class AutoService extends Service {
             projection = mpm.getMediaProjection(pendingResultCode, pendingResultData);
             if (projection == null) throw new IllegalStateException("MediaProjection could not start");
 
-            // Android 14+ / targetSdk 34+ requires a MediaProjection callback to be
-            // registered BEFORE createVirtualDisplay(). The old order caused the
-            // capture session to fail before any frame reached the analyzer.
             projection.registerCallback(new MediaProjection.Callback() {
                 @Override
                 public void onStop() {
@@ -231,7 +238,9 @@ public final class AutoService extends Service {
 
             int targetWidth = Math.min(720, frame.getWidth());
             int targetHeight = Math.max(1, Math.round(frame.getHeight() * (targetWidth / (float) frame.getWidth())));
-            scaled = frame.getWidth() == targetWidth ? frame : Bitmap.createScaledBitmap(frame, targetWidth, targetHeight, false);
+            scaled = frame.getWidth() == targetWidth
+                    ? frame
+                    : Bitmap.createScaledBitmap(frame, targetWidth, targetHeight, false);
 
             float captureScale = scaled.getWidth() / (float) Math.max(1, displayWidth);
             float frameDensity = Math.max(0.5f, densityScale * captureScale);
@@ -240,7 +249,10 @@ public final class AutoService extends Service {
             applyDecision(decision, now);
 
             if (decision.urgent || now - lastStatusAt > 650) {
-                notifyText("VISION · L" + (currentLane + 1) + (drillActive ? " · DRILL" : "") + " · " + decision.reason);
+                String guard = drillRearmBlocked ? " · LOCK" : "";
+                notifyText("VISION · L" + (currentLane + 1)
+                        + (drillActive ? " · DRILL" : "")
+                        + guard + " · " + decision.reason);
                 lastStatusAt = now;
             }
         } catch (Throwable e) {
@@ -263,29 +275,46 @@ public final class AutoService extends Service {
             return;
         }
 
+        // Once started, keep one drill activation alive. The old code forcibly cancelled
+        // at 145 ms and immediately restarted the same target, which stacked activation heat.
         if (drillActive) {
             long activeFor = now - drillStartedAt;
-            boolean keepDrilling = d.type == GameAnalyzer.Type.DRILL;
-            if ((activeFor >= 55 && !keepDrilling) || activeFor >= 145) {
-                int rc = tapControl(s, CONTROL_DRILL);
-                if (rc == 0) {
-                    drillActive = false;
-                    lastDrillAt = now;
-                } else if (now - lastStatusAt > 350) {
-                    notifyText("DRILL CANCEL tap rejected rc=" + rc);
-                    lastStatusAt = now;
+            boolean targetStillPresent = d.type == GameAnalyzer.Type.DRILL;
+
+            if (targetStillPresent) {
+                drillClearFrames = 0;
+                if (activeFor >= MAX_DRILL_ACTIVE_MS) {
+                    cancelDrillAndBlock(s, now, "safety timeout");
+                }
+            } else {
+                drillClearFrames++;
+                if (activeFor >= MIN_DRILL_ACTIVE_MS && drillClearFrames >= CLEAR_FRAMES_TO_CANCEL) {
+                    cancelDrillAndBlock(s, now, "target clear");
                 }
             }
             return;
         }
 
+        // After cancelling, do not re-fire on the same object/noisy pixels. Require several
+        // consecutive frames with no DRILL request before a new activation can be armed.
+        if (drillRearmBlocked) {
+            if (d.type == GameAnalyzer.Type.DRILL) {
+                drillRearmClearFrames = 0;
+                return;
+            }
+            drillRearmClearFrames++;
+            if (drillRearmClearFrames < CLEAR_FRAMES_TO_REARM) return;
+            drillRearmBlocked = false;
+            drillRearmClearFrames = 0;
+        }
+
         switch (d.type) {
             case DRILL -> {
-                if (now - lastDrillAt < 120) return;
                 int rc = tapControl(s, CONTROL_DRILL);
                 if (rc == 0) {
                     drillActive = true;
                     drillStartedAt = now;
+                    drillClearFrames = 0;
                     lastDrillAt = now;
                 } else {
                     notifyText("DRILL tap rejected rc=" + rc);
@@ -301,6 +330,24 @@ public final class AutoService extends Service {
                 else notifyText("TAP rejected rc=" + rc);
             }
             case NONE -> { }
+        }
+    }
+
+    private void cancelDrillAndBlock(ICoscService s, long now, String reason) throws Exception {
+        int rc = tapControl(s, CONTROL_DRILL);
+        if (rc == 0) {
+            drillActive = false;
+            drillRearmBlocked = true;
+            drillClearFrames = 0;
+            drillRearmClearFrames = 0;
+            lastDrillAt = now;
+            if (now - lastStatusAt > 250) {
+                notifyText("DRILL OFF · " + reason);
+                lastStatusAt = now;
+            }
+        } else if (now - lastStatusAt > 350) {
+            notifyText("DRILL CANCEL tap rejected rc=" + rc);
+            lastStatusAt = now;
         }
     }
 
@@ -367,6 +414,15 @@ public final class AutoService extends Service {
         try { startActivity(i); } catch (Throwable ignored) {}
     }
 
+    private void resetDrillState() {
+        drillActive = false;
+        drillRearmBlocked = false;
+        drillClearFrames = 0;
+        drillRearmClearFrames = 0;
+        drillStartedAt = 0;
+        lastDrillAt = 0;
+    }
+
     private void stopAutomation() {
         if (!running.getAndSet(false)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -376,7 +432,7 @@ public final class AutoService extends Service {
         try {
             if (drillActive && shell != null) tapControl(shell, CONTROL_DRILL);
         } catch (Throwable ignored) {}
-        drillActive = false;
+        resetDrillState();
         captureStarted.set(false);
         firstFrameSeen.set(false);
         try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}
@@ -403,9 +459,11 @@ public final class AutoService extends Service {
 
     private Notification buildNotification(String text) {
         Intent stop = new Intent(this, AutoService.class).setAction(ACTION_STOP);
-        PendingIntent stopPi = PendingIntent.getService(this, 1, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stopPi = PendingIntent.getService(
+                this, 1, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent open = new Intent(this, MainActivity.class);
-        PendingIntent openPi = PendingIntent.getActivity(this, 2, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent openPi = PendingIntent.getActivity(
+                this, 2, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentTitle("COSC · external autopilot")
@@ -418,8 +476,13 @@ public final class AutoService extends Service {
     }
 
     private void notifyText(String text) {
-        getSharedPreferences("cosc", MODE_PRIVATE).edit().putBoolean("running", running.get()).putString("status", text).apply();
-        getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildNotification(text));
+        getSharedPreferences("cosc", MODE_PRIVATE)
+                .edit()
+                .putBoolean("running", running.get())
+                .putString("status", text)
+                .apply();
+        getSystemService(NotificationManager.class)
+                .notify(NOTIFICATION_ID, buildNotification(text));
     }
 
     private static String message(Throwable e) {
@@ -427,7 +490,10 @@ public final class AutoService extends Service {
         return m == null || m.isEmpty() ? e.getClass().getSimpleName() : m;
     }
 
-    @Override public IBinder onBind(Intent intent) { return null; }
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
 
     @Override
     public void onDestroy() {
