@@ -19,6 +19,10 @@ public final class SmokeInstrumentation extends Instrumentation {
             click(ui, "Close app", 1000);
             startActivitySync(new Intent().setClassName("com.tanuki276.cosc", "com.tanuki276.cosc.MainActivity")
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            try (android.os.ParcelFileDescriptor.AutoCloseInputStream command = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                    ui.executeShellCommand("settings put secure enabled_accessibility_services com.tanuki276.cosc/.GameAccessService"))) { command.readAllBytes(); }
+            try (android.os.ParcelFileDescriptor.AutoCloseInputStream command = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                    ui.executeShellCommand("settings put secure accessibility_enabled 1"))) { command.readAllBytes(); }
             long accessDeadline = SystemClock.uptimeMillis() + 10000;
             while (GameAccessService.instance == null && SystemClock.uptimeMillis() < accessDeadline)
                 SystemClock.sleep(250);

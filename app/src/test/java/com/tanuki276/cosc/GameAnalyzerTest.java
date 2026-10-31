@@ -21,18 +21,28 @@ public class GameAnalyzerTest {
     private GameFeedback hud(GameFeedback.Mode mode,int heat) {
         GameFeedback f=new GameFeedback();f.targetVisible=true;f.observedAt=10000;f.mode=mode;f.heat=heat;return f;
     }
+    private GameAnalyzer prime(int color) {
+        GameAnalyzer a = new GameAnalyzer();
+        GameFeedback f = hud(GameFeedback.Mode.READY,21);
+        a.analyze(frame(color,1,542),1,1,f,10000);
+        a.analyze(frame(color,1,542),1,1,f,10083);
+        return a;
+    }
+    private GameFeedback near(GameFeedback.Mode mode,int heat) {
+        GameFeedback f=hud(mode,heat);f.depth=65;return f;
+    }
     @Test public void detectsEveryDarkRockFill() {
         int[] fills={0x29272e,0x3f3a40,0x4c4b50,0x20232c,0x382840,0x401c17,0x0f2529,0x2f1530};
         for(int fill:fills){
-            GameAnalyzer.Decision d=new GameAnalyzer().analyze(frame(fill,1,328),1,1,hud(GameFeedback.Mode.READY,21),10000);
+            GameAnalyzer.Decision d=prime(fill).analyze(frame(fill,1,328),1,1,near(GameFeedback.Mode.READY,21),10167);
             assertEquals(Integer.toHexString(fill),GameAnalyzer.Type.DRILL,d.type);
         }
     }
     @Test public void coolingNeverTogglesDrill() {
-        assertNotEquals(GameAnalyzer.Type.DRILL,new GameAnalyzer().analyze(frame(0x29272e,1,328),1,1,hud(GameFeedback.Mode.COOLING,47),10000).type);
+        assertNotEquals(GameAnalyzer.Type.DRILL,prime(0x29272e).analyze(frame(0x29272e,1,328),1,1,near(GameFeedback.Mode.COOLING,47),10167).type);
     }
     @Test public void highHeatPreventsActivation() {
-        assertNotEquals(GameAnalyzer.Type.DRILL,new GameAnalyzer().analyze(frame(0x29272e,1,328),1,1,hud(GameFeedback.Mode.READY,71),10000).type);
+        assertNotEquals(GameAnalyzer.Type.DRILL,prime(0x29272e).analyze(frame(0x29272e,1,328),1,1,near(GameFeedback.Mode.READY,71),10167).type);
     }
     @Test public void cancelOnlyWhenHudConfirmsActive() {
         GameAnalyzer a=new GameAnalyzer();Bitmap b=frame(0x29272e,1,500);
@@ -40,8 +50,17 @@ public class GameAnalyzerTest {
         assertNotEquals(GameAnalyzer.Type.CANCEL,a.analyze(b,1,1,hud(GameFeedback.Mode.READY,21),10000).type);
     }
     @Test public void startsBeforeDeepLayerWindowToCoverInputLatency() {
-        GameFeedback f=hud(GameFeedback.Mode.READY,21);f.depth=75000;f.tipReach=34;
-        assertEquals(GameAnalyzer.Type.DRILL,new GameAnalyzer().analyze(frame(0x29272e,1,390),1,1,f,10000).type);
+        GameFeedback f=hud(GameFeedback.Mode.READY,21);f.depth=74940;f.tipReach=34;
+        GameAnalyzer a=new GameAnalyzer();
+        a.analyze(frame(0x29272e,1,601),1,1,f,10000);
+        a.analyze(frame(0x29272e,1,601),1,1,f,10083);
+        f.depth=75007;
+        assertEquals(GameAnalyzer.Type.DRILL,a.analyze(frame(0x29272e,1,390),1,1,f,10167).type);
+    }
+    @Test public void tracksPreviouslySeenRockThroughDrillOcclusion() {
+        GameAnalyzer a=prime(0x401c17);
+        Bitmap b=Bitmap.createBitmap(360,780,Bitmap.Config.ARGB_8888);b.eraseColor(Color.rgb(9,8,12));
+        assertEquals(GameAnalyzer.Type.DRILL,a.analyze(b,1,1,near(GameFeedback.Mode.READY,21),10167).type);
     }
     @Test public void floatingTextDoesNotBecomeAnObstacle() {
         Bitmap b=Bitmap.createBitmap(360,780,Bitmap.Config.ARGB_8888);b.eraseColor(Color.rgb(9,8,12));

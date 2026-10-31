@@ -4,6 +4,9 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Comparator;
 
 /** Palette/shape detector calibrated to the unmodified CO-DUG canvas renderer. */
 final class GameAnalyzer {
@@ -24,7 +27,8 @@ final class GameAnalyzer {
             0x382840,0x401c17,0x0f2529,0x2f1530};
     private static final int[] ORE = {0x9ba6b2,0xd77c52,0xccd8e4,0xf4c542,
             0xc07cff,0xff5e47,0x54f7e8,0xff62dc};
-    private static final int[] PICKUPS = {0xffd166,0x67e8a5,0x64d8ff,0xffb86b,0xd28cff};
+    private static final int[] PICKUPS = {0x67e8a5,0x64d8ff,0xffb86b,0xd28cff};
+    private static final int[] POINT = {0xffd166};
     static final class ObjectHit {
         final float y;
         final boolean ore;
@@ -32,8 +36,18 @@ final class GameAnalyzer {
     }
     private int[] pixels;
     private int pixelWidth;
+    private static final class RowTrack {
+        final int index;
+        final int[] seen = new int[3];
+        final int[] frame = new int[3];
+        final boolean[] cleared = new boolean[3];
+        RowTrack(int index) { this.index = index; }
+    }
+    private final Map<Integer, RowTrack> tracks = new HashMap<>();
+    private int frameNumber;
+    private int previousDepth;
     int observedLane = -1;
-    void reset() { observedLane = -1; }
+    void reset() { observedLane = -1; tracks.clear(); frameNumber = 0; previousDepth = 0; }
 
     Decision analyze(Bitmap b, int lane, float scale, long ignored) {
         // No reliable readiness feedback => never toggle a drill speculatively.
@@ -51,9 +65,35 @@ final class GameAnalyzer {
         b.getPixels(pixels, 0, pixelWidth, 0, 0, pixelWidth, b.getHeight());
         scale = Math.max(0.01f, scale);
         observedLane = detectPlayer(b, scale);
-        List<ObjectHit>[] objects = detect(b, scale, lane);
+        List<ObjectHit>[] observed = detect(b, scale, lane);
         float body = b.getHeight() * .32f;
         float tip = body + (67 + f.tipReach) * scale;
+        if (f.depth + 20 < previousDepth) reset();
+        previousDepth = f.depth;
+        frameNumber++;
+        // Acquire obstacles BEFORE the player/drill/particles can cover them.
+        // CO-DUG rows are fixed at index * 31 + 90 metres. Quantizing the
+        // externally observed position to that grid removes shake/halo bias.
+        for (int l = 0; l < 3; l++) for (ObjectHit hit : observed[l]) {
+            float distance = (hit.y - body) / scale;
+            if (distance < 140 || distance > 380) continue;
+            float worldDepth = f.depth + distance / 3.25f;
+            int index = Math.round((worldDepth - 90) / 31);
+            if (index < 0 || Math.abs(worldDepth - (index * 31 + 90)) > 8) continue;
+            RowTrack track = tracks.computeIfAbsent(index, RowTrack::new);
+            if (track.frame[l] != frameNumber) { track.seen[l]++; track.frame[l] = frameNumber; }
+        }
+        tracks.values().removeIf(t -> t.index * 31 + 90 < f.depth - 20);
+        @SuppressWarnings("unchecked")
+        List<ObjectHit>[] objects = new List[]{new ArrayList<>(),new ArrayList<>(),new ArrayList<>()};
+        for (RowTrack track : tracks.values()) {
+            float y = body + (track.index * 31 + 90 - f.depth) * 3.25f * scale;
+            if (f.mode == GameFeedback.Mode.ACTIVE && y <= tip + 14 * scale && y >= tip - 23 * scale)
+                track.cleared[lane] = true;
+            for (int l = 0; l < 3; l++) if (track.seen[l] >= 2 && !track.cleared[l])
+                objects[l].add(new ObjectHit(y, false));
+        }
+        for (List<ObjectHit> hits : objects) hits.sort(Comparator.comparingDouble(t -> t.y));
         float speed = (float) Math.min(78, 16 + 62 * Math.log1p(f.depth / 5000.0) / Math.log1p(20));
         float velocity = speed * 3.25f * scale;
         ObjectHit here = next(objects[lane], body - 10 * scale);
@@ -62,7 +102,7 @@ final class GameAnalyzer {
         // Start before the leading edge: one capture interval + gesture dispatch
         // + the next 60 Hz collision tick. A late command at the lower edge can
         // miss the entire collision window at deep-layer speed.
-        float startLead = velocity * .16f;
+        float startLead = velocity * .20f;
         float arrivalY = y - velocity * .085f;
         if (f.mode == GameFeedback.Mode.ACTIVE) {
             if (f.heat >= 55 || y > tip + 30 * scale)
@@ -70,7 +110,7 @@ final class GameAnalyzer {
             return Decision.none("confirmed DRILL: clearing object");
         }
         boolean ready = f.mode == GameFeedback.Mode.READY && f.heat < 48;
-        if (ready && y <= tip + 12 * scale + startLead && arrivalY >= tip - 8 * scale)
+        if (ready && y <= tip + 12 * scale + startLead && arrivalY >= tip - 23 * scale)
             return new Decision(Type.DRILL, here.ore ? "ore in destroy window" : "rock in destroy window");
 
         if (f.mode == GameFeedback.Mode.COOLING
@@ -141,7 +181,8 @@ final class GameAnalyzer {
                         for (int yy = Math.max(first, Math.round(middle - 10 * scale));
                              yy <= Math.min(last, middle + 10 * scale); yy++)
                             for (int xx = x0; xx < x1; xx++)
-                                if (matches(pixels[yy * pixelWidth + xx], PICKUPS, 8)) pickupPixels++;
+                                if (matches(pixels[yy * pixelWidth + xx], PICKUPS, 8)
+                                        || matches(pixels[yy * pixelWidth + xx], POINT, 2)) pickupPixels++;
                         if (pickupPixels < Math.max(4, 8 * scale * scale))
                             out[lane].add(new ObjectHit((first + last) * .5f, ore > rock));
                     }

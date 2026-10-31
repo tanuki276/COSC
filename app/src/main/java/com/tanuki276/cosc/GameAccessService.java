@@ -21,6 +21,7 @@ public final class GameAccessService extends AccessibilityService {
     static volatile GameAccessService instance;
     private static final String TARGET = "com.tanuki276.codug";
     private int tipReach;
+    private int lastDepth;
     private final Handler main = new Handler(Looper.getMainLooper());
     private static final Pattern HEAT = Pattern.compile("(GREEN|YELLOW|ORANGE|RED)\\s+(READY|[0-9]+%|[0-9.]+s)");
     private static final Pattern HP = Pattern.compile("([0-8])/([1-8])");
@@ -40,6 +41,7 @@ public final class GameAccessService extends AccessibilityService {
             if (!TARGET.equals(String.valueOf(root.getPackageName()))) return f;
             f.targetVisible = true;
             f.tipReach = tipReach;
+            f.depth = lastDepth;
             List<AccessibilityNodeInfo> nodes = new ArrayList<>();
             collect(root, nodes);
             try {
@@ -58,10 +60,11 @@ public final class GameAccessService extends AccessibilityService {
                     m = HP.matcher(text);
                     if (m.matches()) f.hp = Integer.parseInt(m.group(1));
                     m = DEPTH.matcher(text);
-                    if (m.matches()) f.depth = Math.max(f.depth, Integer.parseInt(m.group(1).replace(",", "")));
+                    if (m.matches()) f.depth = Integer.parseInt(m.group(1).replace(",", ""));
                 }
             } finally { for (AccessibilityNodeInfo n : nodes) n.recycle(); }
         } finally { root.recycle(); }
+        if (f.targetVisible) lastDepth = f.depth;
         return f;
     }
 
@@ -95,7 +98,7 @@ public final class GameAccessService extends AccessibilityService {
             boolean clicked = best.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             if (clicked) {
                 if (chosen.contains("ロングビット")) tipReach = Math.min(34, tipReach + 8);
-                if (chosen.contains("掘削を開始") || chosen.equals("もう一回")) tipReach = 0;
+                if (chosen.contains("掘削を開始") || chosen.equals("もう一回")) { tipReach = 0; lastDepth = 0; }
             }
             return clicked;
         } finally { for (AccessibilityNodeInfo n : nodes) n.recycle(); root.recycle(); }
