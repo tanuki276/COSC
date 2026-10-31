@@ -82,8 +82,25 @@ public final class ShellService extends ICoscService.Stub {
 
     private boolean targetIsForeground() throws RemoteException {
         try {
-            String text = runForText("sh", "-c", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -n 4");
-            return text.contains(TARGET);
+            // Android/OEM/virtual environments expose the focused app through different dumpsys
+            // fields. Keep the guard, but accept any authoritative foreground/resumed signal.
+            String windows = runForText(
+                    "sh", "-c",
+                    "dumpsys window windows 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp|mObscuringWindow' | head -n 12"
+            );
+            if (windows.contains(TARGET)) return true;
+
+            String activities = runForText(
+                    "sh", "-c",
+                    "dumpsys activity activities 2>/dev/null | grep -E 'topResumedActivity|mResumedActivity|ResumedActivity' | head -n 12"
+            );
+            if (activities.contains(TARGET)) return true;
+
+            String top = runForText(
+                    "sh", "-c",
+                    "dumpsys activity top 2>/dev/null | head -n 80"
+            );
+            return top.contains(TARGET);
         } catch (Throwable e) {
             throw new RemoteException("foreground check failed: " + e.getMessage());
         }
