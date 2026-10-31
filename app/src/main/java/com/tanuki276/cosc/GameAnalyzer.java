@@ -80,7 +80,7 @@ final class GameAnalyzer {
         // During recovery, route away before body contact. Never switch through a
         // hazard which has already passed the drill tip but can still hit the body.
         float horizon = ready ? tip + velocity * .7f : body + velocity * .95f + 30 * scale;
-        if (y < horizon && (!ready || y < tip - 23 * scale)) {
+        if (observedLane >= 0 && y < horizon && (!ready || y < tip - 23 * scale)) {
             int best = lane;
             float bestCost = laneCost(objects[lane], body, tip, horizon, ready, scale);
             for (int candidate = Math.max(0, lane - 1); candidate <= Math.min(2, lane + 1); candidate++) {
@@ -134,7 +134,7 @@ final class GameAnalyzer {
                     last = y; rock += r; ore += o;
                 }
                 if (first >= 0 && (y - last > Math.max(2, 4 * scale) || y == end)) {
-                    if (last - first >= Math.max(4, 9 * scale))
+                    if (last - first >= Math.max(5, 22 * scale))
                         out[lane].add(new ObjectHit((first + last) * .5f, ore > rock));
                     first = -1; rock = 0; ore = 0;
                 }

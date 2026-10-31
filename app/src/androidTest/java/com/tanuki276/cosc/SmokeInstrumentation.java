@@ -16,12 +16,18 @@ public final class SmokeInstrumentation extends Instrumentation {
         Bundle result = new Bundle();
         try {
             UiAutomation ui = getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+            click(ui, "Close app", 1000);
             startActivitySync(new Intent().setClassName("com.tanuki276.cosc", "com.tanuki276.cosc.MainActivity")
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             long accessDeadline = SystemClock.uptimeMillis() + 10000;
             while (GameAccessService.instance == null && SystemClock.uptimeMillis() < accessDeadline)
                 SystemClock.sleep(250);
-            if (!click(ui, "Start external auto", 10000)) throw new AssertionError("Start button missing");
+            if (!click(ui, "Start external auto", 15000)) {
+                click(ui, "Close app", 1000);
+                startActivitySync(new Intent().setClassName("com.tanuki276.cosc", "com.tanuki276.cosc.MainActivity")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                if (!click(ui, "Start external auto", 10000)) throw new AssertionError("Start button missing");
+            }
             // Full-display MediaProjectionConfig eliminates the app selection picker.
             long consentDeadline = SystemClock.uptimeMillis() + 15000;
             while (SystemClock.uptimeMillis() < consentDeadline) {
@@ -62,7 +68,7 @@ public final class SmokeInstrumentation extends Instrumentation {
         return false;
     }
     private boolean clickNode(AccessibilityNodeInfo node, String text) {
-        if (node.isVisibleToUser() && text.equals(String.valueOf(node.getText()))
+        if (node.isVisibleToUser() && text.equalsIgnoreCase(String.valueOf(node.getText()))
                 && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);

@@ -37,6 +37,9 @@ jobs:
           profile: pixel_4
           disable-animations: true
           script: |
+            adb shell wm size 480x960
+            adb shell wm density 160
+            adb shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || true
             adb install -r .smoke-game/app/build/outputs/apk/debug/app-debug.apk
             adb install -r app/build/outputs/apk/debug/app-debug.apk
             adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk

@@ -39,6 +39,15 @@ public class GameAnalyzerTest {
         assertEquals(GameAnalyzer.Type.CANCEL,a.analyze(b,1,1,hud(GameFeedback.Mode.ACTIVE,30),10000).type);
         assertNotEquals(GameAnalyzer.Type.CANCEL,a.analyze(b,1,1,hud(GameFeedback.Mode.READY,21),10000).type);
     }
+    @Test public void startsBeforeDeepLayerWindowToCoverInputLatency() {
+        GameFeedback f=hud(GameFeedback.Mode.READY,21);f.depth=75000;f.tipReach=34;
+        assertEquals(GameAnalyzer.Type.DRILL,new GameAnalyzer().analyze(frame(0x29272e,1,390),1,1,f,10000).type);
+    }
+    @Test public void floatingTextDoesNotBecomeAnObstacle() {
+        Bitmap b=Bitmap.createBitmap(360,780,Bitmap.Config.ARGB_8888);b.eraseColor(Color.rgb(9,8,12));
+        for(int y=325;y<335;y++)for(int x=155;x<205;x++)b.setPixel(x,y,Color.rgb(155,166,178));
+        assertEquals(GameAnalyzer.Type.NONE,new GameAnalyzer().analyze(b,1,1,hud(GameFeedback.Mode.READY,21),10000).type);
+    }
     @Test public void staleOrForeignFeedbackPreventsInput() {
         GameFeedback f=hud(GameFeedback.Mode.READY,21);f.targetVisible=false;
         GameAnalyzer a=new GameAnalyzer();Bitmap b=frame(0x29272e,1,328);
