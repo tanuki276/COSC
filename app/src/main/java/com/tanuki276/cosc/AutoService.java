@@ -5,10 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.ComponentName;
 import android.content.Intent;
-import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
@@ -28,7 +25,6 @@ import android.util.DisplayMetrics;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import rikka.shizuku.Shizuku;
 
 public final class AutoService extends Service {
     public static final String ACTION_START = "com.tanuki276.cosc.START";
@@ -57,7 +53,6 @@ public final class AutoService extends Service {
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
 
-    private volatile ICoscService shell;
     private int pendingResultCode;
     private Intent pendingResultData;
     private int displayWidth;
@@ -67,10 +62,9 @@ public final class AutoService extends Service {
     private int currentLane = 1;
     private long lastMoveAt;
     private long lastDrillAt;
-    private long drillStartedAt;
     private long lastStatusAt;
-    private long drillReadyAt;
     private long lastOverlayTapAt;
+    private long lastMenuCheckAt;
 
     @Override
     public void onCreate() {
@@ -204,7 +198,7 @@ public final class AutoService extends Service {
             if (access == null) throw new IllegalStateException("Enable COSC Accessibility feedback");
             GameFeedback feedback = access.read();
             if (!feedback.targetVisible) return;
-            if (now - lastOverlayTapAt > 800 && access.handleMenu()) {
+            if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
                 lastOverlayTapAt = now;
                 lastDrillAt = now;
                 analyzer.reset();
@@ -232,6 +226,11 @@ public final class AutoService extends Service {
         }
     }
 
+    private boolean checkMenu(GameAccessService access, long now) {
+        lastMenuCheckAt = now;
+        return access.handleMenu();
+    }
+
     private void applyDecision(GameAnalyzer.Decision d, long now) throws Exception {
         GameAccessService access = GameAccessService.instance;
         if (access == null) throw new IllegalStateException("COSC accessibility feedback disconnected");
@@ -239,22 +238,22 @@ public final class AutoService extends Service {
         if (now - lastDrillAt < 160) return;
         switch (d.type) {
             case DRILL, CANCEL -> {
-                int rc = tapControl(shell, CONTROL_DRILL);
+                int rc = tapControl(CONTROL_DRILL);
                 if (rc == 0) lastDrillAt = SystemClock.uptimeMillis();
             }
-            case LEFT -> move(-1, d.urgent, now, shell);
-            case RIGHT -> move(1, d.urgent, now, shell);
+            case LEFT -> move(-1, d.urgent, now);
+            case RIGHT -> move(1, d.urgent, now);
             default -> { }
         }
     }
 
-    private void move(int direction, boolean urgent, long now, ICoscService s) throws Exception {
+    private void move(int direction, boolean urgent, long now) throws Exception {
         long minGap = urgent ? 138 : 150;
         if (now - lastMoveAt < minGap) return;
         int next = Math.max(0, Math.min(2, currentLane + Integer.signum(direction)));
         if (next == currentLane) return;
 
-        int rc = tapControl(s, direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
+        int rc = tapControl(direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
         if (rc == 0) {
             currentLane = next;
             lastMoveAt = now;
@@ -264,7 +263,7 @@ public final class AutoService extends Service {
         }
     }
 
-    private int tapControl(ICoscService s, int control) throws Exception {
+    private int tapControl(int control) throws Exception {
         float scale = Math.max(0.5f, densityScale);
         float cssW = displayWidth / scale;
         float cssH = displayHeight / scale;
@@ -329,7 +328,6 @@ public final class AutoService extends Service {
         imageReader = null;
         virtualDisplay = null;
         projection = null;
-        shell = null;
         pendingResultData = null;
         if (captureThread != null) captureThread.quitSafely();
         captureThread = null;

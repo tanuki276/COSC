@@ -22,6 +22,10 @@ jobs:
           node-version: '22'
       - name: Install test canvas outside app
         run: npm install --no-save --no-package-lock @napi-rs/canvas@0.1.80
+      - name: Prepare isolated compiler for replay debugging
+        run: |
+          mkdir -p replay-output
+          curl -fsSL https://repo.maven.apache.org/maven2/org/eclipse/jdt/ecj/3.40.0/ecj-3.40.0.jar -o replay-output/ecj.jar
       - name: Replay production analyzer against original renderer and collisions
         run: bash tools/replay/run.sh .replay-game
       - uses: actions/upload-artifact@v4

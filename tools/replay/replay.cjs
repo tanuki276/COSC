@@ -38,7 +38,7 @@ function world(seed,w=360,h=780){
  render:()=>{ctx.fillStyle=layerFor(depth).sky;ctx.fillRect(0,0,W,H);drawRows();drawDrill();},
  upgrade:()=>{if(upgradeOverlay.classList.contains('hidden'))return false;const scores=t=>t.includes('冷却フィン')?100:t.includes('高速クラッチ')?95:t.includes('現地修理')?90:t.includes('増設フレーム')?80:t.includes('ロングビット')?70:t.includes('補給パック')?60:t.includes('高トルクモーター')?50:t.includes('鉱石粉砕ヘッド')?40:30;
  const buttons=upgradeChoices.children;buttons.sort((a,b)=>scores(b.innerHTML)-scores(a.innerHTML));buttons[0].onclick();return true;},
- ready:()=>runPromise};`;
+ threats:()=>rows.filter(r=>r.cells[currentLane]&&!r.resolved[currentLane]&&rowY(r)<playerY()+170&&rowY(r)>playerY()-30).map(r=>({y:rowY(r),id:r.cells[currentLane],lane:currentLane})),ready:()=>runPromise};`;
  source=source.replace(/\}\)\(\);\s*$/,exports+'})();');
  vm.runInContext(source,sandbox,{filename:'original-game.js'});
  canvas.width=180;canvas.height=390;canvas.getContext("2d").scale(.5,.5);
@@ -52,6 +52,7 @@ async function main(){
  const results=[];fs.mkdirSync('replay-output',{recursive:true});
  for(const seed of (process.env.REPLAY_SEEDS||'1,42,276').split(',').map(Number)){
   const {g,canvas}=world(seed);g.start();await g.ready();await ask('RESET');
+  let trace=[],lastHp=3;
   let time=10000,lastDrill=0,lastMove=0,moves=0,drills=0,cancels=0,steps=0;
   const dt=1/12;
   while(g.state().depth<100100&&!g.state().gameover&&steps<60000){
@@ -65,6 +66,8 @@ async function main(){
    const heat=s.drill>0?Math.round(s.drillHeat*100):stage;
    const answer=await ask(`180 390 ${s.currentLane} ${mode} ${heat} ${Math.floor(s.depth)} ${s.tipReach} ${Math.round(time)} 0.5 ${zlib.deflateSync(bgra,{level:1}).toString('base64')}`);
    if(!answer)throw Error('bridge exited');
+   trace.push({depth:Math.round(s.depth),mode,heat,answer,threats:g.threats()});if(trace.length>12)trace.shift();
+   if(s.hp<lastHp)console.log('DAMAGE '+JSON.stringify({seed,trace}));lastHp=s.hp;
    const action=answer.split(' ')[0];
    if(time-lastDrill>=160){
     if(action==='DRILL'||action==='CANCEL'){g.activateDrill();lastDrill=time;action==='DRILL'?drills++:cancels++;}

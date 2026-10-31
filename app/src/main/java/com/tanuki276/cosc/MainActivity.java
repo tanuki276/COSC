@@ -14,27 +14,17 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import rikka.shizuku.Shizuku;
 
 public final class MainActivity extends Activity {
-    private static final int SHIZUKU_REQUEST = 276;
     private static final int CAPTURE_REQUEST = 277;
     private TextView status;
-    private Button grant;
     private Button start;
     private Button stop;
-
-    private final Shizuku.OnBinderReceivedListener binderReceived = this::refresh;
-    private final Shizuku.OnBinderDeadListener binderDead = this::refresh;
-    private final Shizuku.OnRequestPermissionResultListener permissionResult = (requestCode, grantResult) -> refresh();
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         setContentView(makeUi());
-        Shizuku.addBinderReceivedListenerSticky(binderReceived);
-        Shizuku.addBinderDeadListener(binderDead);
-        Shizuku.addRequestPermissionResultListener(permissionResult);
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 99);
         }
@@ -73,7 +63,6 @@ public final class MainActivity extends Activity {
         Button access = button("Enable CO-DUG feedback (Accessibility)");
         access.setOnClickListener(v -> startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(access);
-        grant = button("Grant Shizuku");
         start = button("Start external auto");
         stop = button("Stop auto");
 
@@ -86,7 +75,6 @@ public final class MainActivity extends Activity {
         note.setPadding(0, dp(18), 0, 0);
         root.addView(note);
 
-        grant.setOnClickListener(v -> requestShizuku());
         start.setOnClickListener(v -> startAuto());
         stop.setOnClickListener(v -> stopAuto());
         return root;
@@ -99,16 +87,6 @@ public final class MainActivity extends Activity {
         lp.topMargin = dp(12);
         b.setLayoutParams(lp);
         return b;
-    }
-
-    private void requestShizuku() {
-        try {
-            if (!Shizuku.pingBinder()) { refresh(); return; }
-            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) Shizuku.requestPermission(SHIZUKU_REQUEST);
-            else refresh();
-        } catch (Throwable e) {
-            status.setText("Shizuku error: " + e.getMessage());
-        }
     }
 
     private void startAuto() {
@@ -156,18 +134,8 @@ public final class MainActivity extends Activity {
         catch (PackageManager.NameNotFoundException e) { return false; }
     }
 
-    private boolean hasShizukuPermission() {
-        try { return Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED; }
-        catch (Throwable e) { return false; }
-    }
-
     private void refresh() {
         runOnUiThread(() -> {
-            boolean binder = false, permission = false;
-            try {
-                binder = Shizuku.pingBinder();
-                if (binder) permission = Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
-            } catch (Throwable ignored) {}
             boolean running = getSharedPreferences("cosc", MODE_PRIVATE).getBoolean("running", false);
             String live = getSharedPreferences("cosc", MODE_PRIVATE).getString("status", "");
             String text = "CO-DUG: " + (targetInstalled() ? "installed" : "missing")
@@ -175,21 +143,12 @@ public final class MainActivity extends Activity {
                     + "\nHUD feedback: " + (GameAccessService.instance != null ? "ready" : "enable Accessibility")
                     + (live.isEmpty() ? "" : "\n" + live);
             status.setText(text);
-            grant.setEnabled(binder && !permission);
             start.setEnabled(targetInstalled() && !running);
             stop.setEnabled(running);
         });
     }
 
     @Override protected void onResume() { super.onResume(); refresh(); }
-
-    @Override
-    protected void onDestroy() {
-        Shizuku.removeBinderReceivedListener(binderReceived);
-        Shizuku.removeBinderDeadListener(binderDead);
-        Shizuku.removeRequestPermissionResultListener(permissionResult);
-        super.onDestroy();
-    }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 }

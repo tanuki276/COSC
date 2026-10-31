@@ -44,7 +44,7 @@ final class GameAnalyzer {
             return Decision.none("waiting for menu/HUD");
         scale = Math.max(0.01f, scale);
         observedLane = detectPlayer(b, scale);
-        List<ObjectHit>[] objects = detect(b, scale);
+        List<ObjectHit>[] objects = detect(b, scale, lane);
         float body = b.getHeight() * .32f;
         float tip = body + (67 + f.tipReach) * scale;
         float speed = (float) Math.min(78, 16 + 62 * Math.log1p(f.depth / 5000.0) / Math.log1p(20));
@@ -66,7 +66,7 @@ final class GameAnalyzer {
         // During recovery, route away before body contact. Never switch through a
         // hazard which has already passed the drill tip but can still hit the body.
         float horizon = ready ? tip + velocity * .7f : body + velocity * .95f + 30 * scale;
-        if (y < horizon) {
+        if (y < horizon && (!ready || y < tip - 23 * scale)) {
             int best = lane;
             float bestCost = laneCost(objects[lane], body, tip, horizon, ready, scale);
             for (int candidate = Math.max(0, lane - 1); candidate <= Math.min(2, lane + 1); candidate++) {
@@ -77,7 +77,7 @@ final class GameAnalyzer {
             if (best != lane) return new Decision(best < lane ? Type.LEFT : Type.RIGHT,
                     ready ? "route ore/clear lane" : "cooling: avoid contact");
         }
-        return Decision.none("HUD " + f.mode + " heat<=" + f.heat + " depth=" + f.depth);
+        return Decision.none("HUD " + f.mode + " heat<=" + f.heat + " depth=" + f.depth + " y=" + y + " tip=" + tip);
     }
 
     private float laneCost(List<ObjectHit> hits, float body, float tip, float horizon, boolean ready, float scale) {
@@ -96,16 +96,17 @@ final class GameAnalyzer {
     }
 
     @SuppressWarnings("unchecked")
-    List<ObjectHit>[] detect(Bitmap b, float scale) {
+    List<ObjectHit>[] detect(Bitmap b, float scale, int currentLane) {
         int w = b.getWidth(), h = b.getHeight();
         float fieldW = Math.min(w * .88f, 480 * scale);
         float left = (w - fieldW) / 2, laneW = fieldW / 3;
-        int start = Math.max(0, Math.round(h * .32f + 48 * scale));
+        int scanStart = Math.max(0, Math.round(h * .32f - 30 * scale));
         int end = Math.min(Math.round(h * .78f), Math.round(h * .32f + 390 * scale));
         List<ObjectHit>[] out = new List[]{new ArrayList<>(),new ArrayList<>(),new ArrayList<>()};
         for (int lane = 0; lane < 3; lane++) {
             int x0 = Math.max(0, Math.round(left + laneW * (lane + .22f)));
             int x1 = Math.min(w, Math.round(left + laneW * (lane + .78f)));
+            int start = lane == currentLane ? Math.round(h * .32f + 48 * scale) : scanStart;
             int first = -1, last = -1, rock = 0, ore = 0;
             for (int y = start; y <= end; y++) {
                 int r = 0, o = 0;
