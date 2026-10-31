@@ -261,7 +261,10 @@ public final class AutoService extends Service {
         if (access == null) throw new IllegalStateException("COSC accessibility feedback disconnected");
         // Rate-limit requests until a NEW HUD frame confirms the last toggle.
         GameFeedback current=access.read();
+        if(!current.targetVisible || current.paused || current.gameOver)return;
         if(!timing.allow(d.type,current,SystemClock.uptimeMillis()))return;
+        if(d.type==GameAnalyzer.Type.DRILL && current.mode!=GameFeedback.Mode.READY)return;
+        if(d.type==GameAnalyzer.Type.CANCEL && current.mode!=GameFeedback.Mode.ACTIVE)return;
         switch (d.type) {
             case DRILL, CANCEL -> {
                 long requestedAt=SystemClock.uptimeMillis();
