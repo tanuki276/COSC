@@ -46,7 +46,7 @@ public final class AutoService extends Service {
 
     // A drill activation itself adds heat in CO-DUG. Do not pulse/restart it.
     private static final long MIN_DRILL_ACTIVE_MS = 80;
-    private static final long MAX_DRILL_ACTIVE_MS = 520;
+    private static final long MAX_DRILL_ACTIVE_MS = 350;
     private static final int CLEAR_FRAMES_TO_CANCEL = 2;
     private static final int CLEAR_FRAMES_TO_REARM = 3;
 
@@ -75,6 +75,8 @@ public final class AutoService extends Service {
     private long lastDrillAt;
     private long drillStartedAt;
     private long lastStatusAt;
+    private long drillReadyAt;
+    private long lastOverlayTapAt;
 
     private boolean drillActive;
     private boolean drillRearmBlocked;
@@ -141,6 +143,10 @@ public final class AutoService extends Service {
         pendingResultData = resultData;
         firstFrameSeen.set(false);
         resetDrillState();
+        analyzer.reset();
+        currentLane = 1;
+        lastMoveAt = 0;
+        lastOverlayTapAt = 0;
         launchTargetDirect();
 
         try {
@@ -169,7 +175,8 @@ public final class AutoService extends Service {
         if (!captureStarted.compareAndSet(false, true)) return;
 
         try {
-            DisplayMetrics dm = getResources().getDisplayMetrics();
+            DisplayMetrics dm = new DisplayMetrics();
+            getSystemService(android.view.WindowManager.class).getDefaultDisplay().getRealMetrics(dm);
             displayWidth = dm.widthPixels;
             displayHeight = dm.heightPixels;
             densityDpi = dm.densityDpi;
@@ -243,7 +250,7 @@ public final class AutoService extends Service {
                     : Bitmap.createScaledBitmap(frame, targetWidth, targetHeight, false);
 
             float captureScale = scaled.getWidth() / (float) Math.max(1, displayWidth);
-            float frameDensity = Math.max(0.5f, densityScale * captureScale);
+            float frameDensity = Math.max(0.01f, densityScale * captureScale);
             long now = SystemClock.uptimeMillis();
             GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, now - lastDrillAt);
             applyDecision(decision, now);
@@ -272,6 +279,26 @@ public final class AutoService extends Service {
         ICoscService s = shell;
         if (s == null) {
             notifyText("INPUT NOT READY · dropping " + d.type);
+            return;
+        }
+
+        // A successful shell command does not prove that a WebView accepted a toggle.
+        // Never send a late "cancel" after the base 500 ms drill has expired: that
+        // would start a second activation instead. Cooldown may reach 0.32 * 3.2 s.
+        if (drillActive && now - drillStartedAt >= 450) {
+            drillActive = false;
+            drillRearmBlocked = true;
+            drillReadyAt = now + 1100;
+        }
+        if (d.type == GameAnalyzer.Type.TAP) {
+            if (now - lastOverlayTapAt < 1000) return;
+            int rc = s.tap(Math.round(d.xNorm * displayWidth), Math.round(d.yNorm * displayHeight));
+            if (rc == 0) {
+                currentLane = 1;
+                resetDrillState();
+                analyzer.reset();
+                lastOverlayTapAt = now;
+            }
             return;
         }
 
@@ -310,6 +337,7 @@ public final class AutoService extends Service {
 
         switch (d.type) {
             case DRILL -> {
+                if (now < drillReadyAt) return;
                 int rc = tapControl(s, CONTROL_DRILL);
                 if (rc == 0) {
                     drillActive = true;
@@ -341,6 +369,7 @@ public final class AutoService extends Service {
             drillClearFrames = 0;
             drillRearmClearFrames = 0;
             lastDrillAt = now;
+            drillReadyAt = now + 1100;
             if (now - lastStatusAt > 250) {
                 notifyText("DRILL OFF · " + reason);
                 lastStatusAt = now;
@@ -421,6 +450,7 @@ public final class AutoService extends Service {
         drillRearmClearFrames = 0;
         drillStartedAt = 0;
         lastDrillAt = 0;
+        drillReadyAt = 0;
     }
 
     private void stopAutomation() {
@@ -430,7 +460,8 @@ public final class AutoService extends Service {
             return;
         }
         try {
-            if (drillActive && shell != null) tapControl(shell, CONTROL_DRILL);
+            if (drillActive && shell != null && SystemClock.uptimeMillis() - drillStartedAt < 450)
+                tapControl(shell, CONTROL_DRILL);
         } catch (Throwable ignored) {}
         resetDrillState();
         captureStarted.set(false);

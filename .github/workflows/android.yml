@@ -19,7 +19,7 @@ jobs:
         with:
           gradle-version: '8.9'
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        run: gradle testDebugUnitTest assembleDebug --stacktrace
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

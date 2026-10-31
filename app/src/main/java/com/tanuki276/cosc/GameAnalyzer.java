@@ -36,6 +36,13 @@ final class GameAnalyzer {
     private int lastPreferredLane = 1;
     private int stablePreferenceFrames;
 
+    void reset() {
+        previousSample = null;
+        stillFrames = 0;
+        stablePreferenceFrames = 0;
+        lastPreferredLane = 1;
+    }
+
     Decision analyze(Bitmap bitmap, int currentLane, float densityScale, long sinceLastDrillMs) {
         if (bitmap == null || bitmap.getWidth() < 120 || bitmap.getHeight() < 120) {
             return Decision.none("bad frame");
@@ -49,9 +56,10 @@ final class GameAnalyzer {
                 stillFrames = 0;
                 return Decision.tap(yellow[0], yellow[1], "primary/retry");
             }
-            if (stillFrames >= 7) {
+            float[] choice = findUpgradeChoice(bitmap);
+            if (choice != null) {
                 stillFrames = 0;
-                return Decision.tap(0.36f, bitmap.getWidth() > bitmap.getHeight() ? 0.56f : 0.52f, "upgrade choice");
+                return Decision.tap(choice[0], choice[1], "upgrade card");
             }
         }
 
@@ -132,7 +140,7 @@ final class GameAnalyzer {
 
     private LaneState[] scanLanes(Bitmap b, float densityScale) {
         int w = b.getWidth(), h = b.getHeight();
-        densityScale = Math.max(0.5f, densityScale);
+        densityScale = Math.max(0.01f, densityScale);
         float cssScreenW = w / densityScale;
         float cssFieldW = Math.min(cssScreenW * 0.88f, 480f);
         float fieldW = Math.min(w * 0.92f, cssFieldW * densityScale);
@@ -222,7 +230,7 @@ final class GameAnalyzer {
     private float[] findLargeYellowButton(Bitmap b) {
         int w = b.getWidth(), h = b.getHeight();
         boolean[] yellow = new boolean[w * h];
-        for (int y = Math.round(h * 0.16f); y < h; y += 2) {
+        for (int y = (Math.round(h * 0.16f) + 1) & ~1; y < h; y += 2) {
             for (int x = 0; x < w; x += 2) {
                 int c = b.getPixel(x, y);
                 int r = Color.red(c), g = Color.green(c), bl = Color.blue(c);
@@ -258,10 +266,48 @@ final class GameAnalyzer {
                 }
             }
         }
-        if (bestCount > 58 && bestMaxX - bestMinX > w * 0.10f && bestMaxY - bestMinY > 7) {
+        if (bestCount > 58 && bestMaxX - bestMinX > w * 0.10f && bestMaxY - bestMinY > 7
+                && bestMaxX - bestMinX > (bestMaxY - bestMinY) * 2.0f) {
             return new float[]{((bestMinX + bestMaxX) * 0.5f) / w, ((bestMinY + bestMaxY) * 0.5f) / h};
         }
         return null;
+    }
+
+    private float[] findUpgradeChoice(Bitmap b) {
+        int w = b.getWidth(), h = b.getHeight();
+        // .choice uses #172123e8 on the dark modal; require a broad, tall
+        // filled card in the central region, away from the HUD and controls.
+        for (int y = h / 4; y < h * 3 / 4; y += 4) {
+            for (int x = w / 12; x < w * 3 / 4; x += 4) {
+                if (!choiceFill(b.getPixel(x, y))) continue;
+                int right = x;
+                while (right < w && choiceFill(b.getPixel(right, y))) right += 2;
+                int width = right - x;
+                if (width < w * 0.18f || width > w * 0.45f) continue;
+                int bottom = y;
+                while (bottom < h * 0.82f && choiceFill(b.getPixel(x, bottom))) bottom += 2;
+                int height = bottom - y;
+                if (height < h * 0.09f || height > h * 0.40f) continue;
+                // Text and icon must interrupt the otherwise flat card interior.
+                int ink = 0, yellow = 0;
+                for (int yy = y + 6; yy < bottom - 4; yy += 2) {
+                    for (int xx = x + 6; xx < right - 4; xx += 2) {
+                        int c = b.getPixel(xx, yy);
+                        if (Color.red(c) > 150 && Color.green(c) > 150 && Color.blue(c) > 120) ink++;
+                        if (Color.red(c) > 200 && Color.green(c) > 150 && Color.blue(c) < 130) yellow++;
+                    }
+                }
+                if (ink > 12 && yellow > 3)
+                    return new float[]{(x + width * 0.5f) / w, (y + height * 0.5f) / h};
+            }
+        }
+        return null;
+    }
+
+    private boolean choiceFill(int c) {
+        return Color.red(c) >= 19 && Color.red(c) <= 25
+                && Color.green(c) >= 29 && Color.green(c) <= 35
+                && Color.blue(c) >= 31 && Color.blue(c) <= 37;
     }
 
     private String laneSummary(LaneState[] lanes) {

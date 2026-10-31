@@ -118,7 +118,9 @@ public final class MainActivity extends Activity {
             return;
         }
         MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
-        startActivityForResult(mpm.createScreenCaptureIntent(), CAPTURE_REQUEST);
+        startActivityForResult((Build.VERSION.SDK_INT >= 34
+                ? mpm.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
+                : mpm.createScreenCaptureIntent()), CAPTURE_REQUEST);
     }
 
     @Override
