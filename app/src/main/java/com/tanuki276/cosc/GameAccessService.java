@@ -31,7 +31,7 @@ public final class GameAccessService extends AccessibilityService {
     private AccessibilityNodeInfo menu,pauseControl;
     private final List<AccessibilityNodeInfo> hudNodes=new ArrayList<>();
     private long lastTreeAt,controlsAt,observationFloor,hpAt,menuAt;
-    private long pauseObservedAt;
+    private long pauseObservedAt,visualResumeAt;
     private String lastUiSummary="";
     private String pendingMenu="";
     private boolean pendingMenuPaused;
@@ -78,7 +78,7 @@ public final class GameAccessService extends AccessibilityService {
         if(w!=null&&!eventQueued){
             eventQueued=true;AccessibilityEvent copy=AccessibilityEvent.obtain(event);
             w.post(()->{try{AccessibilityNodeInfo n=copy.getSource();if(n!=null){
-                try{if(n.refresh())parse(label(n),SystemClock.uptimeMillis());}finally{n.recycle();}
+                try{if(n.refresh()&&n.isVisibleToUser())parse(label(n),SystemClock.uptimeMillis());}finally{n.recycle();}
             }}finally{copy.recycle();eventQueued=false;}});
         }
     }
@@ -169,7 +169,10 @@ public final class GameAccessService extends AccessibilityService {
             synchronized(lock){latest.targetVisible=target;latest.observedAt=now;}
             if(!target)return;
             collect(r,nodes);
-            synchronized(lock){for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();}
+            synchronized(lock){
+                if(requested<visualResumeAt)return;
+                for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();
+            }
             AccessibilityNodeInfo best=null;int score=0;String bestLabel="";boolean overlay=false;
             Rect[] found={new Rect(),new Rect(),new Rect()};Rect viewport=new Rect();
             AccessibilityNodeInfo[] buttons=new AccessibilityNodeInfo[3];
@@ -200,6 +203,9 @@ public final class GameAccessService extends AccessibilityService {
             boolean allControls=!found[0].isEmpty()&&!found[1].isEmpty()&&!found[2].isEmpty();
             boolean anyControls=!found[0].isEmpty()||!found[1].isEmpty()||!found[2].isEmpty();
             synchronized(lock){
+                // This tree may have started before visual resume and finished
+                // a second later. It cannot reinstate the dismissed modal.
+                if(requested<visualResumeAt)return;
                 boolean wasPaused=latest.paused;
                 if(menu!=null)menu.recycle();menu=best==null?null:AccessibilityNodeInfo.obtain(best);menuLabel=bestLabel;menuAt=now;
                 if(sampledAt>=pauseObservedAt){
@@ -210,9 +216,9 @@ public final class GameAccessService extends AccessibilityService {
                         if(pendingMenu.contains("ロングビット"))latest.tipReach=Math.min(34,latest.tipReach+8);
                         if(pendingMenuPaused&&!latest.paused){latest.resumeAt=pendingMenuAt;depthSamples.clear();}
                         RunTrace.event("MENU_CONFIRMED label="+pendingMenu);
-                        pendingMenu="";
+                        pendingMenu="";latest.menuTapAt=0;
                     }else if(now-pendingMenuAt>1200){
-                        RunTrace.event("MENU_NOT_REFLECTED label="+pendingMenu);pendingMenu="";
+                        RunTrace.event("MENU_NOT_REFLECTED label="+pendingMenu);pendingMenu="";latest.menuTapAt=0;
                     }
                 }
                 if(wasPaused&&!latest.paused&&latest.resumeAt<pauseObservedAt){latest.resumeAt=sampledAt;depthSamples.clear();}
@@ -273,7 +279,7 @@ public final class GameAccessService extends AccessibilityService {
         observationFloor=SystemClock.uptimeMillis();hpAt=0;
         latest.mode=GameFeedback.Mode.UNKNOWN;latest.modeAt=0;latest.depthAt=0;latest.heat=-1;
         latest.hp=-1;latest.depth=0;latest.gameOver=false;latest.tipReach=0;
-        latest.speed=Float.NaN;depthSamples.clear();pendingMenu="";latest.resumeAt=0;
+        latest.speed=Float.NaN;depthSamples.clear();pendingMenu="";latest.resumeAt=0;latest.menuTapAt=0;visualResumeAt=0;
     }}
     boolean handleMenu(){
         AccessibilityNodeInfo action;String chosen;boolean wasPaused;
@@ -290,6 +296,7 @@ public final class GameAccessService extends AccessibilityService {
             if(rc<0)return false;
             synchronized(lock){
                 pendingMenu=chosen;pendingMenuAt=SystemClock.uptimeMillis();pendingMenuPaused=wasPaused;
+                latest.menuTapAt=wasPaused&&rc==0?pendingMenuAt:0;
                 if(rc==0&&(chosen.contains("掘削を開始")||chosen.contains("もう一回"))){
                     observationFloor=SystemClock.uptimeMillis();hpAt=0;
                     latest.runId++;latest.depthAt=0;latest.depth=0;latest.tipReach=0;latest.gameOver=false;
@@ -307,6 +314,22 @@ public final class GameAccessService extends AccessibilityService {
             return wasPaused;
         }catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
         finally{action.recycle();}
+    }
+    boolean confirmVisualResume(long capturedAt,int lane){
+        synchronized(lock){
+            long now=SystemClock.uptimeMillis();
+            if(!latest.paused||latest.gameOver||!latest.targetVisible||lane<0||lane>2
+                    ||latest.menuTapAt==0||capturedAt<latest.menuTapAt+32||now-capturedAt>250
+                    ||pendingMenu.isEmpty()||!pendingMenuPaused)return false;
+            if(pendingMenu.contains("ロングビット"))latest.tipReach=Math.min(34,latest.tipReach+8);
+            latest.paused=false;latest.resumeAt=latest.menuTapAt;latest.menuTapAt=0;
+            visualResumeAt=now;pauseObservedAt=now;depthSamples.clear();
+            RunTrace.event("MENU_VISUAL_CONFIRMED label="+pendingMenu+" capture="+capturedAt+" lane="+lane);
+            pendingMenu="";menuLabel="";menuAt=0;
+            if(menu!=null){menu.recycle();menu=null;}
+            Handler w=worker;if(w!=null)w.postDelayed(()->{if(worker!=null){sampleTree();lastTreeAt=SystemClock.uptimeMillis();}},80);
+            return true;
+        }
     }
     private static String nodeText(AccessibilityNodeInfo n){
         StringBuilder s=new StringBuilder(label(n));
@@ -338,7 +361,9 @@ public final class GameAccessService extends AccessibilityService {
         Rect box;
         synchronized(lock){
             if(!latest.targetVisible||latest.paused||latest.gameOver)return -5;
-            if(SystemClock.uptimeMillis()-controlsAt>2000)return -4;
+            long now=SystemClock.uptimeMillis();
+            boolean justResumed=visualResumeAt>controlsAt&&now-visualResumeAt<1500;
+            if(now-controlsAt>2000&&!justResumed)return -4;
             box=new Rect(controls[control]);
         }
         // Rectangles come from a recent concrete-button tree sample. Virtual

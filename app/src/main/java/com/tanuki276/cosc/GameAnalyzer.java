@@ -75,6 +75,12 @@ final class GameAnalyzer {
         if(d.type==Type.DRILL)pulseAt=completedAt;
         if(d.type==Type.CANCEL)pulseAt=0;
     }
+    int visibleLane(Bitmap b,float scale){
+        int size=b.getWidth()*b.getHeight();
+        if(pixels==null||pixels.length!=size)pixels=new int[size];
+        b.getPixels(pixels,0,b.getWidth(),0,0,b.getWidth(),b.getHeight());
+        return LaneMarker.detect(pixels,b.getWidth(),b.getHeight(),scale);
+    }
     Decision analyze(Bitmap b,int lane,float scale,long ignored){return Decision.none("HUD feedback required");}
 
     Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now){
@@ -90,7 +96,7 @@ final class GameAnalyzer {
             reset();return Decision.none("waiting for live run HUD");
         }
         long frame=f.frameAt>0?f.frameAt:now;
-        if(f.paused){pause(f,frame);return Decision.none("menu: tracks frozen");}
+        if(f.paused){needsMenuScan=true;pause(f,frame);return Decision.none("menu: tracks frozen");}
         if(f.depth+20<previousDepth || previousWidth!=b.getWidth())reset();
         previousDepth=f.depth;previousWidth=b.getWidth();
         int size=b.getWidth()*b.getHeight();
@@ -126,7 +132,7 @@ final class GameAnalyzer {
         if(current.runId!=f.runId || !current.targetVisible || current.gameOver)
             return Decision.none("target/run changed during vision");
         f=current;
-        if(f.paused){pause(f,frame);return Decision.none("menu during vision");}
+        if(f.paused){needsMenuScan=true;pause(f,frame);return Decision.none("menu during vision");}
         if(f.mode==GameFeedback.Mode.UNKNOWN||f.hp<0)
             return Decision.none("waiting for refreshed HUD");
         float body=b.getHeight()*.32f,tip=67+f.tipReach;

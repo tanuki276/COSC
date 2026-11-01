@@ -52,6 +52,17 @@ public final class VisionRegressionCheck {
             GameAnalyzer.Decision d=a.analyze(fixture(0x3f3a40,140,false),1,SCALE,feedback(at),at);
             check(d.type==GameAnalyzer.Type.NONE&&a.needsMenuScan,"obscured board must not dispatch or track modal pixels");
         }
-        System.out.println("Selected-background phantom, eight rock palettes and obscured-board fixtures passed");
+        a=new GameAnalyzer();
+        GameFeedback before=feedback(8720200);before.pendingLane=1;
+        GameFeedback during=before.copy();during.paused=true;during.observedAt=8720253;
+        GameAnalyzer.Decision raced=a.analyze(fixture(0,0,true),1,SCALE,before,8720200,
+                ()->8720289,()->during);
+        check(raced.type==GameAnalyzer.Type.NONE&&a.usedFeedback.paused&&a.needsMenuScan,
+                "9000m trace: pause received during vision must suspend pending move, not time it out");
+        a.analyze(fixture(0,0,true),1,SCALE,during,8720300);
+        check(a.needsMenuScan,"pause already visible at analysis entry must keep the same gate");
+        check(a.visibleLane(fixture(0,0,true),SCALE)==1,"unblurred board confirms visual resume");
+        check(a.visibleLane(fixture(0,0,false),SCALE)==-1,"absent board cannot confirm resume");
+        System.out.println("Vision fixtures and pause-during-analysis/resume regressions passed");
     }
 }

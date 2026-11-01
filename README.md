@@ -21,6 +21,17 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
+- Applies a pause received during pixel processing before move confirmation or
+  timeout handling. Missing lane confirmation reacquires the UI rather than
+  terminating the run at an upgrade. The 9000 m/HP 7 stop trace is covered by a
+  deterministic pause-during-analysis check.
+- After a completed menu touch, samples for the return of both selected-lane
+  borders and acknowledges visible gameplay before a slow AX tree finishes.
+  Clears the dismissed choice and rejects tree requests begun before that visual
+  acknowledgement, preventing old modal snapshots from reopening the pause gate.
+- Preserves the existing control coordinates briefly after visual resume while
+  fresh control nodes are reacquired. Normal input still checks the foreground.
+
 - Rejects palette matches that have no contrast against the background beside
   the rock. This prevents the selected-cell fill from repeatedly creating a
   near-player phantom obstacle and provoking alternating lane changes.
@@ -126,7 +137,7 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.14.0 is a control and diagnostic revision. Physical-device survival to
+Version 0.15.0 is a control and diagnostic revision. Physical-device survival to
 100000 m has not been verified. Validation for this revision consists of RGBA pixel-layout, lane-marker and control-state checks, lane-occupancy arithmetic, plus an APK
 build. The replay and emulator workflows are manual and have not been run for
 this revision.

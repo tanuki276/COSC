@@ -234,8 +234,7 @@ public final class AutoService extends Service {
             if(feedback.hp>=0)previousHp=feedback.hp;
             // Menus and unavailable calibration need no screen-sized bitmap.
             if(feedback.paused){
-                analyzer.pause(feedback,capturedAt);
-                if(pendingLane>=0){RunTrace.event("MENU suspends pending move="+pendingLane);pendingLane=-1;laneVotes=0;}
+                suspendForMenu(feedback,capturedAt);
             }
             if(now-lastMenuCheckAt>200&&now-lastOverlayTapAt>800&&checkMenu(access,now)){
                 lastOverlayTapAt=SystemClock.uptimeMillis();
@@ -250,7 +249,9 @@ public final class AutoService extends Service {
             if(feedback.cssScale<=0){
                 if(now-lastTraceAt>1000){RunTrace.event("WAIT control calibration");lastTraceAt=now;}return;
             }
-            if(feedback.paused)return;
+            // After a completed choice, keep sampling for the actual board's
+            // return instead of waiting for the slow full accessibility tree.
+            if(feedback.paused&&(feedback.menuTapAt==0||capturedAt<feedback.menuTapAt+32))return;
             if(feedback.mode==GameFeedback.Mode.UNKNOWN||feedback.hp<0){
                 if(now-lastTraceAt>1000){RunTrace.event("WAIT live HUD mode="+feedback.mode+" hp="+feedback.hp);lastTraceAt=now;}return;
             }
@@ -265,6 +266,13 @@ public final class AutoService extends Service {
             long sampleMs=SystemClock.uptimeMillis()-sampleStartedAt;
             float frameDensity=feedback.cssScale*sampled.scale;
             feedback=feedbackForFrame(access,capturedAt);
+            if(feedback.paused){
+                int visible=analyzer.visibleLane(frame,frameDensity);
+                if(!access.confirmVisualResume(capturedAt,visible))return;
+                currentLane=visible;pendingLane=-1;laneVotes=0;
+                feedback=feedbackForFrame(access,capturedAt);
+                lastResumeAt=feedback.resumeAt;timing.resume(feedback.resumeAt);
+            }
             long analysisStartedAt=SystemClock.uptimeMillis();
             GameAnalyzer.Decision decision=analyzer.analyze(frame,currentLane,frameDensity,feedback,analysisStartedAt,
                     SystemClock::uptimeMillis,()->feedbackForFrame(access,capturedAt));
@@ -272,6 +280,12 @@ public final class AutoService extends Service {
             long visionMs=now-analysisStartedAt;
             feedback=analyzer.usedFeedback;
             observedDepth=feedback.depth;
+            // Pause may have arrived while pixels were being processed. Apply
+            // the refreshed gate before acknowledging or timing out movement.
+            GameFeedback latest=access.read();
+            if(feedback.paused||latest.paused){
+                suspendForMenu(latest.paused?latest:feedback,capturedAt);access.requestFreshTree();return;
+            }
             if(analyzer.needsMenuScan){
                 access.requestFreshTree();
                 if(now-lastTraceAt>300){RunTrace.event("WAIT obscured board depth="+feedback.depth+" pending="+pendingLane);lastTraceAt=now;}
@@ -291,9 +305,10 @@ public final class AutoService extends Service {
                 }
             }
             if(pendingLane>=0&&now-lastMoveAt>900){
-                RunTrace.event("MOVE_UNCONFIRMED target="+pendingLane+" observed="+analyzer.observedLane);
-                access.pauseForCaptureFailure();notifyText("Stopped: lane confirmation lost; pause requested");
-                mainHandler.post(this::stopAutomation);return;
+                // No visible confirmation is a reason to reacquire the UI,
+                // not to terminate a run at an upgrade overlay.
+                RunTrace.event("WAIT_MOVE_UI target="+pendingLane+" observed="+analyzer.observedLane);
+                access.requestFreshTree();return;
             }
             // Dispatch before writing/flushing the diagnostic record.
             applyDecision(decision,now);
@@ -325,6 +340,11 @@ public final class AutoService extends Service {
             image.close();
             processingFrame.set(false);
         }
+    }
+
+    private void suspendForMenu(GameFeedback feedback,long capturedAt){
+        analyzer.pause(feedback,capturedAt);
+        if(pendingLane>=0){RunTrace.event("MENU suspends pending move="+pendingLane);pendingLane=-1;laneVotes=0;}
     }
 
     private boolean checkMenu(GameAccessService access, long now) {
