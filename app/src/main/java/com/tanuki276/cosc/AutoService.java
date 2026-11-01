@@ -64,6 +64,7 @@ public final class AutoService extends Service {
     private int densityDpi;
     private float densityScale;
     private int currentLane = 1;
+    private int seenRunId;
     private int pendingLane=-1,laneVotes;
     private long lastTraceAt;
     private int observedDepth;
@@ -121,6 +122,7 @@ public final class AutoService extends Service {
             return START_NOT_STICKY;
         }
         GameAccessService.instance.beginRun();
+        seenRunId=GameAccessService.instance.read().runId;
         startCaptureAfterInputReady();
 
         return START_NOT_STICKY;
@@ -222,6 +224,10 @@ public final class AutoService extends Service {
             if(access==null)throw new IllegalStateException("Enable COSC Accessibility feedback");
             GameFeedback feedback=access.read();
             if(!feedback.targetVisible)return;
+            if(feedback.runId!=seenRunId){
+                seenRunId=feedback.runId;analyzer.reset();timing.reset();currentLane=1;pendingLane=-1;
+                lastMoveAt=0;RunTrace.event("NEW_RUN id="+seenRunId);
+            }
             if(feedback.gameOver){RunTrace.event("GAME_OVER depth="+feedback.depth+" hp="+feedback.hp+" mode="+feedback.mode+" heat="+feedback.heat);notifyText("Stopped: collision/game over at "+feedback.depth+"m");mainHandler.post(this::stopAutomation);return;}
             frame = imageToBitmap(image);
             if (frame == null) return;

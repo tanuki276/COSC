@@ -48,7 +48,7 @@ final class GameAnalyzer {
         float predict(long when,float velocity){return distance-velocity*Math.max(0,Math.min(2.5f,(when-at)/1000f));}
     }
     private final List<VisualTrack> tracks=new ArrayList<>();
-    private int sequence,previousDepth,previousWidth;
+    private int sequence,previousDepth,previousWidth,runId=-1;
     private long previousFrame,pulseAt,pausedAt;
     private int pauseDepth;
     private float opticalVelocity;
@@ -71,6 +71,11 @@ final class GameAnalyzer {
 
     Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now){
         if(b==null||!f.targetVisible||now-f.observedAt>1200)return Decision.none("waiting for target");
+        if(runId!=f.runId){reset();runId=f.runId;}
+        // Intro/background frames have no live HUD and must not seed tracks.
+        if(f.mode==GameFeedback.Mode.UNKNOWN||f.hp<0||f.depthAt==0){
+            reset();return Decision.none("waiting for live run HUD");
+        }
         long frame=f.frameAt>0?f.frameAt:now;
         if(f.paused){pause(f,frame);return Decision.none("menu: tracks frozen");}
         if(pausedAt>0){

@@ -21,6 +21,15 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
+- Excludes intro images without a live HUD and resets on a dispatched new-game
+  start, while preserving upgrade-pause snapshots within the same game.
+- Uses recent verified control rectangles even when virtual AX node identities
+  expire; foreground is still checked before the physical gesture.
+- Derives wide-layout CSS scale from button centre spacing (253.5 CSS px), not
+  AX gaps that may shrink when touch rectangles expand. Narrow layouts use the
+  WebView's Android density.
+
+
 - Freezes obstacle positions through upgrade menus and rebases the tracking
   clock to the completed resume touch. Refreshes the HUD/menu immediately after
   selection, and rejects pre-resume/transition frames.
@@ -65,7 +74,7 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.9.0 is a control and diagnostic revision. Physical-device survival to
+Version 0.10.0 is a control and diagnostic revision. Physical-device survival to
 100000 m has not been verified. This revision is compiled only; the replay and
 emulator workflows are manual and have not been run for this revision.
 

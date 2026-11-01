@@ -30,7 +30,7 @@ public final class GameAccessService extends AccessibilityService {
     private final Rect[] controls={new Rect(),new Rect(),new Rect()};
     private AccessibilityNodeInfo menu,pauseControl;
     private final List<AccessibilityNodeInfo> hudNodes=new ArrayList<>();
-    private long lastTreeAt;
+    private long lastTreeAt,controlsAt;
     private String pendingMenu="";
     private boolean pendingMenuPaused;
     private long pendingMenuAt;
@@ -195,8 +195,14 @@ public final class GameAccessService extends AccessibilityService {
                         if(controlNodes[i]!=null)controlNodes[i].recycle();
                         controlNodes[i]=AccessibilityNodeInfo.obtain(buttons[i]);
                     }
-                    float a=found[1].left-found[0].right,b=found[2].left-found[1].right;
-                    if(a>0&&b>0&&Math.abs(a-b)<=Math.max(2,Math.max(a,b)*.3f))latest.cssScale=(a+b)/20f;
+                    controlsAt=SystemClock.uptimeMillis();
+                    float span=found[2].exactCenterX()-found[0].exactCenterX();
+                    float width=viewport.isEmpty()?latest.viewWidth:viewport.width();
+                    // AX expands button hit rectangles, shrinking the reported
+                    // gap. Centres are invariant. For the 340 CSS-px group,
+                    // flex 1:2:1 + padding/borders gives a 253.5 CSS-px span.
+                    float calibrated=width>0&&span/width<.65f?span/253.5f:getResources().getDisplayMetrics().density;
+                    if(calibrated>=.5f&&calibrated<=6)latest.cssScale=calibrated;
                 }
             }
         }finally{for(AccessibilityNodeInfo n:nodes)n.recycle();r.recycle();}
@@ -230,7 +236,14 @@ public final class GameAccessService extends AccessibilityService {
             int rc=tap(box.centerX(),box.centerY());
             RunTrace.event("MENU_TOUCH label="+chosen+" bounds="+box+" rc="+rc);
             if(rc<0)return false;
-            synchronized(lock){pendingMenu=chosen;pendingMenuAt=SystemClock.uptimeMillis();pendingMenuPaused=wasPaused;}
+            synchronized(lock){
+                pendingMenu=chosen;pendingMenuAt=SystemClock.uptimeMillis();pendingMenuPaused=wasPaused;
+                if(rc==0&&(chosen.contains("掘削を開始")||chosen.contains("もう一回"))){
+                    latest.runId++;latest.depth=0;latest.tipReach=0;latest.gameOver=false;
+                    latest.mode=GameFeedback.Mode.UNKNOWN;latest.modeAt=0;latest.hp=-1;
+                    latest.speed=Float.NaN;depthSamples.clear();
+                }
+            }
             if(wasPaused&&rc==0){
                 synchronized(lock){latest.paused=false;latest.resumeAt=SystemClock.uptimeMillis();}
                 Handler h=hudWorker;if(h!=null)h.post(this::refreshHud);
@@ -265,18 +278,15 @@ public final class GameAccessService extends AccessibilityService {
         finally{n.recycle();}
     }
     int tapControl(int control)throws InterruptedException{
-        AccessibilityNodeInfo active=root(false);
-        if(active==null)return -5;
-        boolean target=TARGET.equals(String.valueOf(active.getPackageName()));active.recycle();if(!target)return -5;
-        Rect box;AccessibilityNodeInfo button;
+        Rect box;
         synchronized(lock){
             if(!latest.targetVisible||latest.paused||latest.gameOver)return -5;
-            box=new Rect(controls[control]);button=controlNodes[control]==null?null:AccessibilityNodeInfo.obtain(controlNodes[control]);
+            if(SystemClock.uptimeMillis()-controlsAt>2000)return -4;
+            box=new Rect(controls[control]);
         }
-        if(button!=null)try{
-            if(!button.refresh()||!button.isVisibleToUser())return -4;
-            button.getBoundsInScreen(box);
-        }finally{button.recycle();}
+        // Rectangles come from a recent concrete-button tree sample. Virtual
+        // AX node identities may expire on every DOM update; do not drop a shot
+        // just because a cached node cannot refresh. tap() rechecks foreground.
         RunTrace.event("CONTROL_TOUCH index="+control+" bounds="+box);
         return box.isEmpty()?-4:tap(box.centerX(),box.centerY());
     }
