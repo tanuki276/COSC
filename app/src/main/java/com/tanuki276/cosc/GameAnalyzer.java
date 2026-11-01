@@ -109,7 +109,7 @@ final class GameAnalyzer {
         for(VisualTrack t:tracks){
             float imageD=t.predict(frame,velocity);
             if(!matched.contains(t.id))t.absent++;
-            if(t.lane==lane&&f.mode==GameFeedback.Mode.ACTIVE&&t.absent>=2&&imageD<tip-26)
+            if(t.lane==lane&&f.mode==GameFeedback.Mode.ACTIVE&&now-f.modeAt<450&&t.absent>=2&&imageD<tip-26)
                 t.cleared=true;
             if(t.cleared)continue;
             float d=t.predict(now,velocity);
@@ -131,7 +131,7 @@ final class GameAnalyzer {
         // Use one bounded pulse. Never add a whole slow capture interval to
         // its lead: the game's base pulse lasts only 0.5 seconds.
         float lead=velocity*Math.min(.22f,latency+.06f);
-        if(f.mode==GameFeedback.Mode.ACTIVE){
+        if(fresh&&f.mode==GameFeedback.Mode.ACTIVE){
             if(fresh&&f.heat>=74)return new Decision(Type.CANCEL,"heat guard");
             if(fresh&&distance>tip+velocity*.45f)return new Decision(Type.CANCEL,"clear ahead");
             if(distance>=tip-24)return Decision.none("pulse: "+scene);

@@ -14,7 +14,8 @@ External controller for the unmodified offline CO-DUG Android app
 5. Stop with the notification action or **Stop auto** in COSC.
 
 Shizuku is not required. The earlier shell-per-touch path has been
-replaced by semantic accessibility button clicks, with gesture fallback only when a click is rejected. Screen capture detects the canvas;
+replaced by physical gestures at refreshed bounds of concrete HTML buttons. Clickable containers
+are never selected as controls or menus. Screen capture detects the canvas;
 accessibility reads visible HUD text and menu buttons. No game memory, save-file
 editing, APK patching, or injection into CO-DUG is used.
 
@@ -31,6 +32,11 @@ editing, APK patching, or injection into CO-DUG is used.
 - Chooses actual accessible upgrade buttons, prioritizing cooling and cooldown.
 - Turns the x2 accelerator off through its visible button before normal control.
 - Confirms lane changes visually and does not repeat an unconfirmed move.
+- Selects only concrete button nodes; descendant text cannot turn a WebView or
+  overlay container into a menu button. Live accelerator touches preserve tracks.
+- Uses gestures because an accepted semantic click did not produce game actions
+  in the FCNT M06 device trace. Menu dispatch and observed confirmation are logged
+  separately. HUD state from a previous run is invalidated on start.
 - Allows escape movement while a drill acknowledgement is pending.
 - Requires live HUD mode for toggles and calibrated actual button spacing for vision.
 - Requests pause and stops if capture stalls during play.
@@ -40,7 +46,7 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.5.0 is a control and diagnostic revision. Physical-device survival to
+Version 0.6.0 is a control and diagnostic revision. Physical-device survival to
 100000 m has not been verified. This revision is compiled only; the replay and
 emulator workflows are manual and have not been run for this revision.
 

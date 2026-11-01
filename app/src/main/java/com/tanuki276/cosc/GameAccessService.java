@@ -31,8 +31,13 @@ public final class GameAccessService extends AccessibilityService {
     private AccessibilityNodeInfo menu,pauseControl;
     private final List<AccessibilityNodeInfo> hudNodes=new ArrayList<>();
     private long lastTreeAt;
+    private String pendingMenu="";
+    private boolean pendingMenuPaused;
+    private long pendingMenuAt;
+    private long lastNodeTrace;
     private String menuLabel="";
-    private HandlerThread workerThread;
+    private HandlerThread workerThread,hudThread;
+    private Handler hudWorker;
     private Handler worker;
     private volatile boolean eventQueued;
     private final ArrayDeque<double[]> depthSamples=new ArrayDeque<>();
@@ -45,14 +50,20 @@ public final class GameAccessService extends AccessibilityService {
         instance=this;
         workerThread=new HandlerThread("cosc-hud");workerThread.start();worker=new Handler(workerThread.getLooper());
         worker.post(poll);
+        hudThread=new HandlerThread("cosc-live-hud");hudThread.start();hudWorker=new Handler(hudThread.getLooper());
+        hudWorker.post(hudPoll);
     }
     private final Runnable poll=new Runnable(){public void run(){
         try{
             long now=SystemClock.uptimeMillis();
             if(now-lastTreeAt>=700){sampleTree();lastTreeAt=SystemClock.uptimeMillis();}
-            else refreshHud();
+
         }catch(Throwable ignored){}
         if(worker!=null)worker.postDelayed(this,70);
+    }};
+    private final Runnable hudPoll=new Runnable(){public void run(){
+        try{refreshHud();}catch(Throwable ignored){}
+        Handler h=hudWorker;if(h!=null)h.postDelayed(this,60);
     }};
     @Override public void onAccessibilityEvent(AccessibilityEvent event){
         if(!TARGET.equals(String.valueOf(event.getPackageName())))return;
@@ -73,6 +84,8 @@ public final class GameAccessService extends AccessibilityService {
     @Override public void onDestroy(){
         instance=null;Handler w=worker;worker=null;if(w!=null)w.removeCallbacksAndMessages(null);
         if(workerThread!=null)workerThread.quitSafely();
+        Handler h=hudWorker;hudWorker=null;if(h!=null)h.removeCallbacksAndMessages(null);
+        if(hudThread!=null)hudThread.quitSafely();
         synchronized(lock){if(menu!=null)menu.recycle();menu=null;
             for(int i=0;i<3;i++){if(controlNodes[i]!=null)controlNodes[i].recycle();controlNodes[i]=null;}
         }
@@ -92,7 +105,7 @@ public final class GameAccessService extends AccessibilityService {
         text=text.replace('\u00a0',' ').trim();
         synchronized(lock){
             Matcher m=HEAT.matcher(text);
-            if(m.find()&&at>=latest.modeAt){
+            if(m.matches()&&at>=latest.modeAt){
                 String state=m.group(2);
                 latest.mode=state.equals("READY")?GameFeedback.Mode.READY:
                         state.endsWith("%")?GameFeedback.Mode.ACTIVE:GameFeedback.Mode.COOLING;
@@ -118,10 +131,12 @@ public final class GameAccessService extends AccessibilityService {
         }
     }
     private void refreshHud(){
-        for(AccessibilityNodeInfo n:hudNodes){
+        List<AccessibilityNodeInfo> snapshot=new ArrayList<>();
+        synchronized(lock){for(AccessibilityNodeInfo n:hudNodes)snapshot.add(AccessibilityNodeInfo.obtain(n));}
+        try{for(AccessibilityNodeInfo n:snapshot){
             long before=SystemClock.uptimeMillis();
             if(n.refresh()&&n.isVisibleToUser())parse(label(n),(before+SystemClock.uptimeMillis())/2);
-        }
+        }}finally{for(AccessibilityNodeInfo n:snapshot)n.recycle();}
     }
     private void sampleTree(){
         long requested=SystemClock.uptimeMillis();AccessibilityNodeInfo r=root(true);long now=SystemClock.uptimeMillis();
@@ -133,29 +148,45 @@ public final class GameAccessService extends AccessibilityService {
             synchronized(lock){latest.targetVisible=target;latest.observedAt=now;}
             if(!target)return;
             collect(r,nodes);
-            for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();
+            synchronized(lock){for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();}
             AccessibilityNodeInfo best=null;int score=0;
             Rect[] found={new Rect(),new Rect(),new Rect()};Rect viewport=new Rect();
             AccessibilityNodeInfo[] buttons=new AccessibilityNodeInfo[3];
             for(AccessibilityNodeInfo n:nodes){
                 String text=label(n);parse(text,sampledAt);
-                if(HEAT.matcher(text).find()||DEPTH.matcher(text).matches()||HP.matcher(text).matches())
-                    hudNodes.add(AccessibilityNodeInfo.obtain(n));
+                if(HEAT.matcher(text).matches()||DEPTH.matcher(text).matches()||HP.matcher(text).matches())
+                    synchronized(lock){hudNodes.add(AccessibilityNodeInfo.obtain(n));}
                 String id=String.valueOf(n.getViewIdResourceName());
+                boolean isButton=n.isClickable()&&"android.widget.Button".equals(String.valueOf(n.getClassName()));
                 if("android.webkit.WebView".equals(String.valueOf(n.getClassName())))n.getBoundsInScreen(viewport);
-                if(n.isClickable()&&(id.endsWith("leftControl")||text.equals("←"))){n.getBoundsInScreen(found[0]);buttons[0]=n;}
-                if(n.isClickable()&&(id.endsWith("drillControl")||(nodeText(n).contains("DRILL")&&nodeText(n).contains("SPACE")))){n.getBoundsInScreen(found[1]);buttons[1]=n;}
-                if(n.isClickable()&&(id.endsWith("rightControl")||text.equals("→"))){n.getBoundsInScreen(found[2]);buttons[2]=n;}
-                if(n.isClickable()&&(id.endsWith("pauseBtn")||text.equals("Ⅱ"))){
+                if(isButton&&(id.endsWith("leftControl")||text.equals("←"))){n.getBoundsInScreen(found[0]);buttons[0]=n;}
+                if(isButton&&(id.endsWith("drillControl")||(text.contains("DRILL")||nodeText(n).startsWith("DRILL")))){n.getBoundsInScreen(found[1]);buttons[1]=n;}
+                if(isButton&&(id.endsWith("rightControl")||text.equals("→"))){n.getBoundsInScreen(found[2]);buttons[2]=n;}
+                if(isButton&&(id.endsWith("pauseBtn")||text.equals("Ⅱ"))){
                     synchronized(lock){if(pauseControl!=null)pauseControl.recycle();pauseControl=AccessibilityNodeInfo.obtain(n);}
                 }
-                if(!n.isClickable())continue;
+                if(isButton&&now-lastNodeTrace>5000){
+                    Rect bounds=new Rect();n.getBoundsInScreen(bounds);
+                    RunTrace.event("BUTTON label="+nodeText(n)+" class="+n.getClassName()+" bounds="+bounds);
+                }
+                if(!isButton)continue;
                 String button=nodeText(n);int s=menuScore(button);
                 if(s>score){best=n;score=s;menuLabel=button;}
             }
+            if(now-lastNodeTrace>5000)lastNodeTrace=now;
             synchronized(lock){
                 if(menu!=null)menu.recycle();menu=best==null?null:AccessibilityNodeInfo.obtain(best);
                 latest.paused=best!=null&&!menuLabel.contains("x2 ON");
+                if(!pendingMenu.isEmpty()&&sampledAt>pendingMenuAt){
+                    if(best==null||!menuLabel.equals(pendingMenu)){
+                        if(pendingMenu.contains("ロングビット"))latest.tipReach=Math.min(34,latest.tipReach+8);
+                        if(pendingMenuPaused){latest.depthAt=sampledAt;depthSamples.clear();latest.speed=Float.NaN;}
+                        RunTrace.event("MENU_CONFIRMED label="+pendingMenu);
+                        pendingMenu="";
+                    }else if(now-pendingMenuAt>1200){
+                        RunTrace.event("MENU_NOT_REFLECTED label="+pendingMenu);pendingMenu="";
+                    }
+                }
                 if(!viewport.isEmpty()){latest.viewLeft=viewport.left;latest.viewTop=viewport.top;
                     latest.viewWidth=viewport.width();latest.viewHeight=viewport.height();}
                 if(!found[0].isEmpty()&&!found[1].isEmpty()&&!found[2].isEmpty()){
@@ -171,29 +202,40 @@ public final class GameAccessService extends AccessibilityService {
         }finally{for(AccessibilityNodeInfo n:nodes)n.recycle();r.recycle();}
     }
     private static int menuScore(String t){
-        return t.contains("x2 ON")?210:t.contains("掘削を開始")||t.contains("もう一回")||t.contains("掘削を再開")?200:
-                t.contains("冷却フィン")?100:t.contains("高速クラッチ")||t.contains("COOLDOWN")?95:
+        return t.contains("x2 ON")?10:t.contains("掘削を開始")||t.contains("もう一回")||t.contains("掘削を再開")?200:
+                t.contains("冷却フィン")?100:t.contains("高速クラッチ")?95:
                 t.contains("現地修理")?90:t.contains("増設フレーム")?80:t.contains("ロングビット")?70:
                 t.contains("補給パック")?60:t.contains("高トルクモーター")?50:t.contains("鉱石粉砕ヘッド")?40:
                 t.contains("ポイント磁石")?30:0;
     }
     GameFeedback read(){synchronized(lock){GameFeedback f=latest.copy();
         if(SystemClock.uptimeMillis()-f.observedAt>1500)f.targetVisible=false;return f;}}
+    // Clear only observations that can belong to an earlier run. Geometry is
+    // retained, but fresh HUD readings are required before the first toggle.
+    void beginRun(){synchronized(lock){
+        latest.mode=GameFeedback.Mode.UNKNOWN;latest.modeAt=0;latest.depthAt=0;latest.heat=-1;
+        latest.hp=-1;latest.depth=0;latest.gameOver=false;latest.tipReach=0;
+        latest.speed=Float.NaN;depthSamples.clear();pendingMenu="";
+    }}
     boolean handleMenu(){
-        AccessibilityNodeInfo action;String chosen;
-        synchronized(lock){if(menu==null)return false;action=AccessibilityNodeInfo.obtain(menu);chosen=menuLabel;}
+        AccessibilityNodeInfo action;String chosen;boolean wasPaused;
+        synchronized(lock){
+            if(menu==null||!pendingMenu.isEmpty())return false;
+            action=AccessibilityNodeInfo.obtain(menu);chosen=menuLabel;wasPaused=latest.paused;
+        }
         try{
-            if(!action.refresh()||!action.isVisibleToUser())return false;
-            if(!action.performAction(AccessibilityNodeInfo.ACTION_CLICK))return false;
-            synchronized(lock){latest.paused=false;latest.depthAt=SystemClock.uptimeMillis();depthSamples.clear();latest.speed=Float.NaN;
-                if(chosen.contains("ロングビット"))latest.tipReach=Math.min(34,latest.tipReach+8);
-                if(chosen.contains("掘削を開始")||chosen.contains("もう一回")){
-                    latest.tipReach=0;latest.depth=0;latest.depthAt=SystemClock.uptimeMillis();latest.gameOver=false;depthSamples.clear();
-                }
-                if(menu!=null)menu.recycle();menu=null;
-            }
-            return true;
-        }finally{action.recycle();}
+            if(!action.refresh()||!action.isVisibleToUser()
+                    ||!"android.widget.Button".equals(String.valueOf(action.getClassName())))return false;
+            Rect box=new Rect();action.getBoundsInScreen(box);if(box.isEmpty())return false;
+            int rc=tap(box.centerX(),box.centerY());
+            RunTrace.event("MENU_TOUCH label="+chosen+" bounds="+box+" rc="+rc);
+            if(rc!=0)return false;
+            synchronized(lock){pendingMenu=chosen;pendingMenuAt=SystemClock.uptimeMillis();pendingMenuPaused=wasPaused;}
+            // Acceleration is a live HUD button. Touching it must not erase
+            // obstacle tracks, lane acknowledgement, or drill acknowledgement.
+            return wasPaused;
+        }catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
+        finally{action.recycle();}
     }
     private static String nodeText(AccessibilityNodeInfo n){
         StringBuilder s=new StringBuilder(label(n));
@@ -209,7 +251,12 @@ public final class GameAccessService extends AccessibilityService {
         AccessibilityNodeInfo n;
         synchronized(lock){n=pauseControl==null?null:AccessibilityNodeInfo.obtain(pauseControl);}
         if(n==null)return false;
-        try{return n.refresh()&&n.isVisibleToUser()&&n.performAction(AccessibilityNodeInfo.ACTION_CLICK);}
+        try{
+            if(!n.refresh()||!n.isVisibleToUser())return false;
+            Rect box=new Rect();n.getBoundsInScreen(box);if(box.isEmpty())return false;
+            Path p=new Path();p.moveTo(box.centerX(),box.centerY());
+            return dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p,0,40)).build(),null,main);
+        }
         finally{n.recycle();}
     }
     int tapControl(int control)throws InterruptedException{
@@ -221,12 +268,11 @@ public final class GameAccessService extends AccessibilityService {
             if(!latest.targetVisible||latest.paused||latest.gameOver)return -5;
             box=new Rect(controls[control]);button=controlNodes[control]==null?null:AccessibilityNodeInfo.obtain(controlNodes[control]);
         }
-        // WebView's semantic click avoids a queued gesture hitting a moving or
-        // resized control. Only fall back when the action itself was rejected.
         if(button!=null)try{
-            if(button.refresh()&&button.isVisibleToUser()&&TARGET.equals(String.valueOf(button.getPackageName()))
-                    &&button.performAction(AccessibilityNodeInfo.ACTION_CLICK))return 0;
+            if(!button.refresh()||!button.isVisibleToUser())return -4;
+            button.getBoundsInScreen(box);
         }finally{button.recycle();}
+        RunTrace.event("CONTROL_TOUCH index="+control+" bounds="+box);
         return box.isEmpty()?-4:tap(box.centerX(),box.centerY());
     }
     int tap(int x,int y)throws InterruptedException{
@@ -235,7 +281,7 @@ public final class GameAccessService extends AccessibilityService {
             AccessibilityNodeInfo r=root(false);if(r==null){done.countDown();return;}
             boolean target=TARGET.equals(String.valueOf(r.getPackageName()));r.recycle();if(!target){done.countDown();return;}
             Path p=new Path();p.moveTo(x,y);
-            boolean dispatched=dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p,0,20)).build(),new GestureResultCallback(){
+            boolean dispatched=dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p,0,40)).build(),new GestureResultCallback(){
                 @Override public void onCompleted(GestureDescription g){ok[0]=true;done.countDown();}
                 @Override public void onCancelled(GestureDescription g){done.countDown();}
             },main);

@@ -120,6 +120,7 @@ public final class AutoService extends Service {
             stopAutomation();
             return START_NOT_STICKY;
         }
+        GameAccessService.instance.beginRun();
         startCaptureAfterInputReady();
 
         return START_NOT_STICKY;
@@ -248,8 +249,9 @@ public final class AutoService extends Service {
             if (feedback.mode == GameFeedback.Mode.ACTIVE) confirmedDrillFrames++;
             if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
                 lastOverlayTapAt = now;
-                analyzer.reset();pendingLane=-1;timing.reset();
-                RunTrace.event("MENU accepted depth="+feedback.depth);
+                // Pause/resume keeps tracks safe through analyzer's paused-frame path.
+                pendingLane=-1;
+                RunTrace.event("MENU touch dispatched depth="+feedback.depth);
                 return;
             }
             if(feedback.cssScale<=0){RunTrace.event("WAIT control calibration");return;}
