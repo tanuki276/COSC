@@ -98,11 +98,16 @@ final class GameAnalyzer {
         List<ObjectHit>[] objects = new List[]{new ArrayList<>(),new ArrayList<>(),new ArrayList<>()};
         for (RowTrack track : tracks.values()) {
             float y = body + (track.index * 31 + 90 - f.decisionDepth()) * 3.25f * scale;
-            long modeAt=f.modeAt>0?f.modeAt:now;
-            float modeDepth=f.decisionDepth()-f.speed()*(now-modeAt)/1000f;
-            float atMode=body+(track.index*31+90-modeDepth)*3.25f*scale;
-            if (f.mode == GameFeedback.Mode.ACTIVE && atMode <= tip + 14 * scale && atMode >= tip - 23 * scale)
-                track.cleared[lane] = true;
+            // ACTIVE is not proof that this rock has already been destroyed.
+            // Retain it until a captured image from after the destroy window
+            // shows no rock. A newer HUD value must never clear an older image.
+            float imageY=body+(track.index*31+90-f.imageDepth())*3.25f*scale;
+            boolean visible=false;
+            for(ObjectHit hit:observed[lane])
+                if(Math.abs(hit.y-imageY)<22*scale){visible=true;break;}
+            if (f.mode==GameFeedback.Mode.ACTIVE && drillingLane==lane
+                    && track.index==drillingRow && imageY<tip-26*scale && !visible)
+                track.cleared[lane]=true;
             for (int l = 0; l < 3; l++) if (track.seen[l] >= 2 && !track.cleared[l]) {
                 ObjectHit hit=new ObjectHit(y,false);hit.rowIndex=track.index;objects[l].add(hit);
             }
@@ -116,12 +121,14 @@ final class GameAnalyzer {
         // Start before the leading edge: one capture interval + gesture dispatch
         // + the next 60 Hz collision tick. A late command at the lower edge can
         // miss the entire collision window at deep-layer speed.
-        float startLead = velocity * Math.max(.16f,Math.min(.55f,(f.inputLatencyMs+f.framePeriodMs+30)/1000f));
+        float startLead = velocity * Math.max(.10f,Math.min(.22f,(f.inputLatencyMs+Math.min(100,f.framePeriodMs)+20)/1000f));
         float arrivalY = y - velocity * Math.max(.04f,f.inputLatencyMs/1000f);
         if (f.mode == GameFeedback.Mode.ACTIVE) {
             RowTrack pending=tracks.get(drillingRow);
             boolean waitingForRow=pending!=null&&drillingLane==lane&&!pending.cleared[lane];
-            if (f.heat >= 55 || (!waitingForRow && y > tip + 30 * scale))
+            // Keep the accepted pulse alive through the target's collision
+            // window; it naturally expires after 0.5 s in the game.
+            if (f.heat >= 78 || (!waitingForRow && y > tip + 30 * scale))
                 return new Decision(Type.CANCEL, "confirmed DRILL: target cleared/heat guard");
             return Decision.none("confirmed DRILL: clearing object");
         }

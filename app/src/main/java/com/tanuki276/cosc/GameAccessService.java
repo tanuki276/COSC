@@ -28,6 +28,8 @@ public final class GameAccessService extends AccessibilityService {
     private final GameFeedback latest=new GameFeedback();
     private final Rect[] controls={new Rect(),new Rect(),new Rect()};
     private AccessibilityNodeInfo menu;
+    private final List<AccessibilityNodeInfo> hudNodes=new ArrayList<>();
+    private long lastTreeAt;
     private String menuLabel="";
     private HandlerThread workerThread;
     private Handler worker;
@@ -38,13 +40,18 @@ public final class GameAccessService extends AccessibilityService {
     private static final Pattern DEPTH=Pattern.compile("^\\s*([0-9,]+)m\\s*$");
 
     @Override protected void onServiceConnected(){
+        if(Build.VERSION.SDK_INT>=33)setCacheEnabled(false);
         instance=this;
         workerThread=new HandlerThread("cosc-hud");workerThread.start();worker=new Handler(workerThread.getLooper());
         worker.post(poll);
     }
     private final Runnable poll=new Runnable(){public void run(){
-        try{sampleTree();}catch(Throwable ignored){}
-        if(worker!=null)worker.postDelayed(this,350);
+        try{
+            long now=SystemClock.uptimeMillis();
+            if(now-lastTreeAt>=700){sampleTree();lastTreeAt=SystemClock.uptimeMillis();}
+            else refreshHud();
+        }catch(Throwable ignored){}
+        if(worker!=null)worker.postDelayed(this,70);
     }};
     @Override public void onAccessibilityEvent(AccessibilityEvent event){
         if(!TARGET.equals(String.valueOf(event.getPackageName())))return;
@@ -107,6 +114,11 @@ public final class GameAccessService extends AccessibilityService {
             if(text.equals("DRILL BROKEN"))latest.gameOver=true;
         }
     }
+    private void refreshHud(){
+        for(AccessibilityNodeInfo n:hudNodes){
+            if(n.refresh()&&n.isVisibleToUser())parse(label(n),SystemClock.uptimeMillis());
+        }
+    }
     private void sampleTree(){
         long requested=SystemClock.uptimeMillis();AccessibilityNodeInfo r=root(true);long now=SystemClock.uptimeMillis();
         long sampledAt=(requested+now)/2;
@@ -117,10 +129,13 @@ public final class GameAccessService extends AccessibilityService {
             synchronized(lock){latest.targetVisible=target;latest.observedAt=now;}
             if(!target)return;
             collect(r,nodes);
+            for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();
             AccessibilityNodeInfo best=null;int score=0;
             Rect[] found={new Rect(),new Rect(),new Rect()};Rect viewport=new Rect();
             for(AccessibilityNodeInfo n:nodes){
                 String text=label(n);parse(text,sampledAt);
+                if(HEAT.matcher(text).find()||DEPTH.matcher(text).matches())
+                    hudNodes.add(AccessibilityNodeInfo.obtain(n));
                 String id=String.valueOf(n.getViewIdResourceName());
                 if("android.webkit.WebView".equals(String.valueOf(n.getClassName())))n.getBoundsInScreen(viewport);
                 if(n.isClickable()&&(id.endsWith("leftControl")||text.equals("←")))n.getBoundsInScreen(found[0]);
