@@ -28,7 +28,14 @@ editing, APK patching, or injection into CO-DUG is used.
 - Starts a drill only when the visible HUD says READY and the heat stage permits.
 - Cancels only when the visible HUD confirms an active drill; waits for actual
   cooldown feedback rather than an assumed fixed timeout.
-- Checks neighboring lanes down to the body contact zone before moving.
+- Starts escape based on where a rock will be when the input arrives, rather
+  than waiting for it to pass the drill window on screen.
+- Rejects destination lanes with rocks in the projected landing/body collision
+  zone; waits through cooldown when recovery can finish before interception.
+- A row must have overlapped an active drill window before its disappearance
+  can clear its track. Late pulses cannot erase a missed rock from the planner.
+- Includes capture cadence in the bounded activation lead and confirms moves
+  with one stable target-lane observation after the animation settling period.
 - Chooses actual accessible upgrade buttons, prioritizing cooling and cooldown.
 - Turns the x2 accelerator off through its visible button before normal control.
 - Confirms lane changes visually and does not repeat an unconfirmed move.
@@ -50,7 +57,7 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.7.0 is a control and diagnostic revision. Physical-device survival to
+Version 0.8.0 is a control and diagnostic revision. Physical-device survival to
 100000 m has not been verified. This revision is compiled only; the replay and
 emulator workflows are manual and have not been run for this revision.
 

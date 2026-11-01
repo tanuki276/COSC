@@ -44,17 +44,21 @@ final class GameAnalyzer {
         int id,lane,seen,absent;
         float distance;
         long at,lastSeen;
-        boolean ore,cleared;
+        boolean ore,cleared,covered;
         float predict(long when,float velocity){return distance-velocity*Math.max(0,Math.min(2.5f,(when-at)/1000f));}
     }
     private final List<VisualTrack> tracks=new ArrayList<>();
     private int sequence,previousDepth,previousWidth;
-    private long previousFrame;
+    private long previousFrame,pulseAt;
     private float opticalVelocity;
     int observedLane=-1;
     String scene="";
-    void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;observedLane=-1;}
+    void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;observedLane=-1;pulseAt=0;}
     void accepted(Decision d) { }
+    void accepted(Decision d,long completedAt){
+        if(d.type==Type.DRILL)pulseAt=completedAt;
+        if(d.type==Type.CANCEL)pulseAt=0;
+    }
     Decision analyze(Bitmap b,int lane,float scale,long ignored){return Decision.none("HUD feedback required");}
 
     Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now){
@@ -109,8 +113,13 @@ final class GameAnalyzer {
         for(VisualTrack t:tracks){
             float imageD=t.predict(frame,velocity);
             if(!matched.contains(t.id))t.absent++;
-            if(t.lane==lane&&f.mode==GameFeedback.Mode.ACTIVE&&now-f.modeAt<450&&t.absent>=2&&imageD<tip-26)
-                t.cleared=true;
+            // Remember evidence that this pulse covered this specific row.
+            // ACTIVE observed only after a late rock has passed the tip is not
+            // evidence of destruction. Retain that rock as a collision threat.
+            if(t.lane==lane&&f.mode==GameFeedback.Mode.ACTIVE&&now-f.modeAt<450
+                    &&pulseAt>0&&frame>=pulseAt+16&&frame-pulseAt<1000
+                    &&imageD>=tip-24&&imageD<=tip+15)t.covered=true;
+            if(t.covered&&t.absent>=2&&imageD<tip-26)t.cleared=true;
             if(t.cleared)continue;
             float d=t.predict(now,velocity);
             ObjectHit h=new ObjectHit(body+d*scale,t.ore);h.rowIndex=t.id;objects[t.lane].add(h);
@@ -127,35 +136,58 @@ final class GameAnalyzer {
         }
         scene="v="+Math.round(velocity)+" tracks="+tracks.size()+" lane="+lane+" next="+Math.round(distance)+" tip="+tip+lanes;
         boolean fresh=f.modeAt>0&&now-f.modeAt<450;
-        float latency=Math.max(.03f,Math.min(.25f,f.inputLatencyMs/1000f));
+        float latency=Math.max(.04f,Math.min(.4f,f.inputLatencyMs/1000f));
         // Use one bounded pulse. Never add a whole slow capture interval to
         // its lead: the game's base pulse lasts only 0.5 seconds.
-        float lead=velocity*Math.min(.22f,latency+.06f);
+        float lead=velocity*Math.min(.30f,latency+Math.min(.10f,f.framePeriodMs/2000f)+.03f);
+        float arrival=distance-velocity*latency;
+        // A command that would arrive below the destroy window has already
+        // missed, even if the rock is still above that boundary right now.
+        boolean missed=arrival<tip-24;
         if(fresh&&f.mode==GameFeedback.Mode.ACTIVE){
             if(fresh&&f.heat>=74)return new Decision(Type.CANCEL,"heat guard");
             if(fresh&&distance>tip+velocity*.45f)return new Decision(Type.CANCEL,"clear ahead");
-            if(distance>=tip-24)return Decision.none("pulse: "+scene);
+            if(!missed)return Decision.none("pulse: "+scene);
             // A missed rock below the tip still requires an escape while active.
         }
         boolean ready=fresh&&f.mode==GameFeedback.Mode.READY&&f.heat>=0&&f.heat<48;
-        if(ready&&distance<=tip+12+lead&&distance-velocity*latency>=tip-24){
+        if(ready&&distance<=tip+12+lead&&!missed){
             Decision d=new Decision(Type.DRILL,"intercept: "+scene);d.rowIndex=here.rowIndex;d.lane=lane;return d;
         }
-        // During stale/unknown feedback, prefer a clear lane instead of freezing.
-        float horizon=body+(tip+velocity*(ready?.55f:Math.max(.8f,f.cooldownSeconds+.25f)))*scale;
-        boolean missed=distance<tip-24;
+        // Don't switch lanes just because cooldown is nonzero. If recovery
+        // completes with time to dispatch before the leading edge, stay put.
+        float timeToWindow=(distance-tip-15)/velocity;
+        if(fresh&&f.mode==GameFeedback.Mode.COOLING&&f.heat<48
+                &&timeToWindow>f.cooldownSeconds+latency+.12f)
+            return Decision.none("recover before target: "+scene);
+        float lookahead=Math.max(.7f,latency+Math.min(.25f,f.framePeriodMs/1000f)+.30f);
+        float horizon=body+(tip+velocity*lookahead)*scale;
         if(distance*scale+body<horizon&&(!ready||missed)){
             int best=lane;
-            float bestCost=laneCost(objects[lane],body,body+tip*scale,horizon,ready,scale);
+            float bestCost=laneCost(objects[lane],body,body+tip*scale,horizon,false,scale);
+            float landing=latency+.06f;
             for(int candidate=Math.max(0,lane-1);candidate<=Math.min(2,lane+1);candidate++){
-                float cost=laneCost(objects[candidate],body,body+tip*scale,horizon,ready,scale)+(candidate==lane?0:.15f);
+                if(candidate!=lane&&!safeLanding(objects[candidate],body,tip,velocity,landing,scale))continue;
+                float cost=laneCost(objects[candidate],body,body+tip*scale,horizon,false,scale)+(candidate==lane?0:.15f);
                 if(cost<bestCost){best=candidate;bestCost=cost;}
             }
-            if(best!=lane)return new Decision(best<lane?Type.LEFT:Type.RIGHT,0,0,"escape: "+scene,missed);
+            if(best!=lane){
+                Decision d=new Decision(best<lane?Type.LEFT:Type.RIGHT,0,0,"escape before contact: "+scene,missed);
+                d.lane=lane;return d;
+            }
         }
         return Decision.none(scene+" HUD="+f.mode+" fresh="+fresh);
     }
 
+    private boolean safeLanding(List<ObjectHit> hits,float body,float tip,float velocity,float delay,float scale){
+        for(ObjectHit hit:hits){
+            float atArrival=(hit.y-body)/scale-velocity*delay;
+            // Include the actual +/-13 body hit zone and a dispatch/capture
+            // margin. Never enter a lane containing an already missed rock.
+            if(atArrival>=-20&&atArrival<Math.max(tip-24,20+velocity*.18f))return false;
+        }
+        return true;
+    }
     private float laneCost(List<ObjectHit> hits, float body, float tip, float horizon, boolean ready, float scale) {
         float cost = 0;
         for (ObjectHit hit : hits) {

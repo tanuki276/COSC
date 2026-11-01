@@ -259,7 +259,7 @@ public final class AutoService extends Service {
             if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>220){
                 if(pendingLane<0)currentLane=analyzer.observedLane;
                 else if(analyzer.observedLane==pendingLane){
-                    if(++laneVotes>=2){currentLane=pendingLane;pendingLane=-1;RunTrace.event("MOVE confirmed lane="+currentLane);}
+                    if(++laneVotes>=1){currentLane=pendingLane;pendingLane=-1;RunTrace.event("MOVE confirmed lane="+currentLane);}
                 }else{
                     laneVotes=0;
                     if(capturedAt-lastMoveAt>500){
@@ -319,10 +319,10 @@ public final class AutoService extends Service {
                 long requestedAt=SystemClock.uptimeMillis();
                 int rc = tapControl(CONTROL_DRILL);
                 RunTrace.event("INPUT "+d.type+" rc="+rc+" elapsed="+(SystemClock.uptimeMillis()-requestedAt));
-                if(rc>=0){lastDrillAt=SystemClock.uptimeMillis();timing.accepted(d.type,requestedAt);analyzer.accepted(d);}
+                if(rc>=0){lastDrillAt=SystemClock.uptimeMillis();timing.accepted(d.type,requestedAt);analyzer.accepted(d,lastDrillAt);}
             }
-            case LEFT -> move(-1, d.urgent, now);
-            case RIGHT -> move(1, d.urgent, now);
+            case LEFT -> {if(pendingLane<0&&d.lane>=0)currentLane=d.lane;move(-1,d.urgent,now);}
+            case RIGHT -> {if(pendingLane<0&&d.lane>=0)currentLane=d.lane;move(1,d.urgent,now);}
             default -> { }
         }
     }
