@@ -13,16 +13,16 @@ External controller for the unmodified offline CO-DUG Android app
 4. Keep CO-DUG in portrait orientation. Stop AUTO before rotating the device.
 5. Stop with the notification action or **Stop auto** in COSC.
 
-Shizuku is not required by version 0.2. The earlier shell-per-touch path has been
-replaced by Android accessibility gestures. Screen capture detects the canvas;
+Shizuku is not required. The earlier shell-per-touch path has been
+replaced by semantic accessibility button clicks, with gesture fallback only when a click is rejected. Screen capture detects the canvas;
 accessibility reads visible HUD text and menu buttons. No game memory, save-file
 editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
 - Detects all eight rock fill palettes, including dark basalt/void/error stone.
-- Confirms rock/ore centers in two distant frames, then tracks them on the
-  original 31 m row grid using visible depth, so the drill cannot hide a target.
+- Tracks rock/ore centres directly across captured images, estimates scroll speed,
+  and retains occluded targets. Rounded/asynchronous HUD depth does not position rocks.
 - Uses CO-DUG's real 39 CSS pixel drill collision window and an input lead time.
 - Starts a drill only when the visible HUD says READY and the heat stage permits.
 - Cancels only when the visible HUD confirms an active drill; waits for actual
@@ -30,12 +30,24 @@ editing, APK patching, or injection into CO-DUG is used.
 - Checks neighboring lanes down to the body contact zone before moving.
 - Chooses actual accessible upgrade buttons, prioritizing cooling and cooldown.
 - Turns the x2 accelerator off through its visible button before normal control.
-- Restricts gestures and HUD reads to CO-DUG's foreground package.
+- Confirms lane changes visually and does not repeat an unconfirmed move.
+- Allows escape movement while a drill acknowledgement is pending.
+- Requires live HUD mode for toggles and calibrated actual button spacing for vision.
+- Requests pause and stops if capture stalls during play.
+- Restricts clicks, gestures and HUD reads to CO-DUG's foreground package.
+- Keeps a bounded local decision/input trace. Use **実行記録を共有** in COSC to
+  export it explicitly after a run. Nothing is uploaded automatically.
 
-## Build and verification
+## Validation status
+
+Version 0.5.0 is a control and diagnostic revision. Physical-device survival to
+100000 m has not been verified. This revision is compiled only; the replay and
+emulator workflows are manual and have not been run for this revision.
+
+## Build and optional historical harness
 
 ```sh
-gradle testDebugUnitTest assembleDebug
+gradle assembleDebug
 ```
 
 The **Original CO-DUG 100000m replay** workflow checks out CO-DUG at the fixed

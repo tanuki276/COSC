@@ -8,6 +8,7 @@ final class ControlTiming {
     float latencyMs() { return latencyMs; }
     void reset() { awaiting=null;sentAt=0;latencyMs=120; }
     boolean allow(GameAnalyzer.Type type, GameFeedback f, long now) {
+        if(type==GameAnalyzer.Type.LEFT||type==GameAnalyzer.Type.RIGHT)return true;
         if (awaiting != null) {
             long sampleAt=f.modeAt > 0 ? f.modeAt : f.observedAt;
             boolean acknowledged=sampleAt >= sentAt && (awaiting == GameAnalyzer.Type.DRILL

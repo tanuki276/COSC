@@ -26,8 +26,9 @@ public final class GameAccessService extends AccessibilityService {
     private final Handler main=new Handler(Looper.getMainLooper());
     private final Object lock=new Object();
     private final GameFeedback latest=new GameFeedback();
+    private final AccessibilityNodeInfo[] controlNodes=new AccessibilityNodeInfo[3];
     private final Rect[] controls={new Rect(),new Rect(),new Rect()};
-    private AccessibilityNodeInfo menu;
+    private AccessibilityNodeInfo menu,pauseControl;
     private final List<AccessibilityNodeInfo> hudNodes=new ArrayList<>();
     private long lastTreeAt;
     private String menuLabel="";
@@ -72,7 +73,9 @@ public final class GameAccessService extends AccessibilityService {
     @Override public void onDestroy(){
         instance=null;Handler w=worker;worker=null;if(w!=null)w.removeCallbacksAndMessages(null);
         if(workerThread!=null)workerThread.quitSafely();
-        synchronized(lock){if(menu!=null)menu.recycle();menu=null;}
+        synchronized(lock){if(menu!=null)menu.recycle();menu=null;
+            for(int i=0;i<3;i++){if(controlNodes[i]!=null)controlNodes[i].recycle();controlNodes[i]=null;}
+        }
         super.onDestroy();
     }
     private AccessibilityNodeInfo root(boolean children){
@@ -116,7 +119,8 @@ public final class GameAccessService extends AccessibilityService {
     }
     private void refreshHud(){
         for(AccessibilityNodeInfo n:hudNodes){
-            if(n.refresh()&&n.isVisibleToUser())parse(label(n),SystemClock.uptimeMillis());
+            long before=SystemClock.uptimeMillis();
+            if(n.refresh()&&n.isVisibleToUser())parse(label(n),(before+SystemClock.uptimeMillis())/2);
         }
     }
     private void sampleTree(){
@@ -132,15 +136,19 @@ public final class GameAccessService extends AccessibilityService {
             for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();
             AccessibilityNodeInfo best=null;int score=0;
             Rect[] found={new Rect(),new Rect(),new Rect()};Rect viewport=new Rect();
+            AccessibilityNodeInfo[] buttons=new AccessibilityNodeInfo[3];
             for(AccessibilityNodeInfo n:nodes){
                 String text=label(n);parse(text,sampledAt);
-                if(HEAT.matcher(text).find()||DEPTH.matcher(text).matches())
+                if(HEAT.matcher(text).find()||DEPTH.matcher(text).matches()||HP.matcher(text).matches())
                     hudNodes.add(AccessibilityNodeInfo.obtain(n));
                 String id=String.valueOf(n.getViewIdResourceName());
                 if("android.webkit.WebView".equals(String.valueOf(n.getClassName())))n.getBoundsInScreen(viewport);
-                if(n.isClickable()&&(id.endsWith("leftControl")||text.equals("←")))n.getBoundsInScreen(found[0]);
-                if(n.isClickable()&&(id.endsWith("drillControl")||(text.contains("DRILL")&&text.contains("SPACE"))))n.getBoundsInScreen(found[1]);
-                if(n.isClickable()&&(id.endsWith("rightControl")||text.equals("→")))n.getBoundsInScreen(found[2]);
+                if(n.isClickable()&&(id.endsWith("leftControl")||text.equals("←"))){n.getBoundsInScreen(found[0]);buttons[0]=n;}
+                if(n.isClickable()&&(id.endsWith("drillControl")||(nodeText(n).contains("DRILL")&&nodeText(n).contains("SPACE")))){n.getBoundsInScreen(found[1]);buttons[1]=n;}
+                if(n.isClickable()&&(id.endsWith("rightControl")||text.equals("→"))){n.getBoundsInScreen(found[2]);buttons[2]=n;}
+                if(n.isClickable()&&(id.endsWith("pauseBtn")||text.equals("Ⅱ"))){
+                    synchronized(lock){if(pauseControl!=null)pauseControl.recycle();pauseControl=AccessibilityNodeInfo.obtain(n);}
+                }
                 if(!n.isClickable())continue;
                 String button=nodeText(n);int s=menuScore(button);
                 if(s>score){best=n;score=s;menuLabel=button;}
@@ -151,7 +159,11 @@ public final class GameAccessService extends AccessibilityService {
                 if(!viewport.isEmpty()){latest.viewLeft=viewport.left;latest.viewTop=viewport.top;
                     latest.viewWidth=viewport.width();latest.viewHeight=viewport.height();}
                 if(!found[0].isEmpty()&&!found[1].isEmpty()&&!found[2].isEmpty()){
-                    for(int i=0;i<3;i++)controls[i].set(found[i]);
+                    for(int i=0;i<3;i++){
+                        controls[i].set(found[i]);
+                        if(controlNodes[i]!=null)controlNodes[i].recycle();
+                        controlNodes[i]=AccessibilityNodeInfo.obtain(buttons[i]);
+                    }
                     float a=found[1].left-found[0].right,b=found[2].left-found[1].right;
                     if(a>0&&b>0&&Math.abs(a-b)<=Math.max(2,Math.max(a,b)*.3f))latest.cssScale=(a+b)/20f;
                 }
@@ -193,8 +205,28 @@ public final class GameAccessService extends AccessibilityService {
             if(c.isVisibleToUser()){out.add(c);collect(c,out);}else c.recycle();
         }}
     }
+    boolean pauseForCaptureFailure(){
+        AccessibilityNodeInfo n;
+        synchronized(lock){n=pauseControl==null?null:AccessibilityNodeInfo.obtain(pauseControl);}
+        if(n==null)return false;
+        try{return n.refresh()&&n.isVisibleToUser()&&n.performAction(AccessibilityNodeInfo.ACTION_CLICK);}
+        finally{n.recycle();}
+    }
     int tapControl(int control)throws InterruptedException{
-        Rect box; synchronized(lock){box=new Rect(controls[control]);}
+        AccessibilityNodeInfo active=root(false);
+        if(active==null)return -5;
+        boolean target=TARGET.equals(String.valueOf(active.getPackageName()));active.recycle();if(!target)return -5;
+        Rect box;AccessibilityNodeInfo button;
+        synchronized(lock){
+            if(!latest.targetVisible||latest.paused||latest.gameOver)return -5;
+            box=new Rect(controls[control]);button=controlNodes[control]==null?null:AccessibilityNodeInfo.obtain(controlNodes[control]);
+        }
+        // WebView's semantic click avoids a queued gesture hitting a moving or
+        // resized control. Only fall back when the action itself was rejected.
+        if(button!=null)try{
+            if(button.refresh()&&button.isVisibleToUser()&&TARGET.equals(String.valueOf(button.getPackageName()))
+                    &&button.performAction(AccessibilityNodeInfo.ACTION_CLICK))return 0;
+        }finally{button.recycle();}
         return box.isEmpty()?-4:tap(box.centerX(),box.centerY());
     }
     int tap(int x,int y)throws InterruptedException{

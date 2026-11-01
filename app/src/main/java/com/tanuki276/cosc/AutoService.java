@@ -47,6 +47,7 @@ public final class AutoService extends Service {
     private final GameAnalyzer analyzer = new GameAnalyzer();
     private final ControlTiming timing = new ControlTiming();
     private long lastFrameAt;
+    private volatile long lastImageAt;
     private float framePeriodMs=83;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -63,6 +64,8 @@ public final class AutoService extends Service {
     private int densityDpi;
     private float densityScale;
     private int currentLane = 1;
+    private int pendingLane=-1,laneVotes;
+    private long lastTraceAt;
     private int observedDepth;
     private int confirmedDrillFrames;
     private long lastMoveAt;
@@ -103,6 +106,8 @@ public final class AutoService extends Service {
         firstFrameSeen.set(false);
         analyzer.reset();
         timing.reset();
+        RunTrace.start(this);
+        lastFrameAt=0;lastImageAt=SystemClock.uptimeMillis();framePeriodMs=83;pendingLane=-1;laneVotes=0;
         currentLane = 1;
         observedDepth = 0;
         confirmedDrillFrames = 0;
@@ -162,6 +167,7 @@ public final class AutoService extends Service {
             );
             if (virtualDisplay == null) throw new IllegalStateException("VirtualDisplay could not start");
 
+            mainHandler.postDelayed(captureWatchdog,500);
             launchTargetDirect();
             notifyText("VISION+TOUCH READY · waiting for first frame");
 
@@ -177,11 +183,27 @@ public final class AutoService extends Service {
         }
     }
 
+    private final Runnable captureWatchdog=new Runnable(){public void run(){
+        if(!running.get())return;
+        if(firstFrameSeen.get()&&SystemClock.uptimeMillis()-lastImageAt>1200){
+            GameAccessService access=GameAccessService.instance;
+            GameFeedback f=access==null?null:access.read();
+            if(f!=null&&f.targetVisible&&!f.paused&&!f.gameOver){
+                boolean paused=access.pauseForCaptureFailure();
+                RunTrace.event("CAPTURE_TIMEOUT pauseAccepted="+paused);
+                notifyText("Stopped: capture stalled. Pause requested; restart AUTO.");stopAutomation();return;
+            }
+        }
+        mainHandler.postDelayed(this,500);
+    }};
+
     private void onImageAvailable(ImageReader reader) {
         if (!running.get()) return;
-        Image image = reader.acquireLatestImage();
+        Image image;
+        try{image=reader.acquireLatestImage();}catch(IllegalStateException closed){return;}
         if (image == null) return;
         firstFrameSeen.set(true);
+        lastImageAt=SystemClock.uptimeMillis();
         if (!processingFrame.compareAndSet(false, true)) {
             image.close();
             return;
@@ -194,12 +216,12 @@ public final class AutoService extends Service {
         long ageNanos=System.nanoTime()-image.getTimestamp();
         long capturedAt=ageNanos>=0&&ageNanos<2_000_000_000L?acquiredAt-ageNanos/1_000_000L:acquiredAt;
         try {
-            if(acquiredAt-capturedAt>400)return;
+            if(acquiredAt-capturedAt>250){RunTrace.event("DROP stale frame age="+(acquiredAt-capturedAt));return;}
             GameAccessService access=GameAccessService.instance;
             if(access==null)throw new IllegalStateException("Enable COSC Accessibility feedback");
             GameFeedback feedback=access.read();
             if(!feedback.targetVisible)return;
-            if(feedback.gameOver){notifyText("Stopped: collision/game over at "+feedback.depth+"m");mainHandler.post(this::stopAutomation);return;}
+            if(feedback.gameOver){RunTrace.event("GAME_OVER depth="+feedback.depth+" hp="+feedback.hp+" mode="+feedback.mode+" heat="+feedback.heat);notifyText("Stopped: collision/game over at "+feedback.depth+"m");mainHandler.post(this::stopAutomation);return;}
             frame = imageToBitmap(image);
             if (frame == null) return;
 
@@ -226,11 +248,33 @@ public final class AutoService extends Service {
             if (feedback.mode == GameFeedback.Mode.ACTIVE) confirmedDrillFrames++;
             if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
                 lastOverlayTapAt = now;
+                analyzer.reset();pendingLane=-1;timing.reset();
+                RunTrace.event("MENU accepted depth="+feedback.depth);
                 return;
             }
+            if(feedback.cssScale<=0){RunTrace.event("WAIT control calibration");return;}
             GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, feedback, now);
-            if (analyzer.observedLane >= 0 && (capturedAt-lastMoveAt)>220)
-                currentLane = analyzer.observedLane;
+            if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>220){
+                if(pendingLane<0)currentLane=analyzer.observedLane;
+                else if(analyzer.observedLane==pendingLane){
+                    if(++laneVotes>=2){currentLane=pendingLane;pendingLane=-1;RunTrace.event("MOVE confirmed lane="+currentLane);}
+                }else{
+                    laneVotes=0;
+                    if(capturedAt-lastMoveAt>500){
+                        currentLane=analyzer.observedLane;pendingLane=-1;
+                        RunTrace.event("MOVE not reflected actual="+currentLane);
+                    }
+                }
+            }
+            if(now-lastTraceAt>100||decision.type!=GameAnalyzer.Type.NONE){
+                RunTrace.event("FRAME capture="+capturedAt+" depth="+feedback.depth+" hp="+feedback.hp
+                    +" depthAge="+(now-feedback.depthAt)+" modeAge="+(now-feedback.modeAt)
+                    +" mode="+feedback.mode+" heat="+feedback.heat+" css="+frameDensity
+                    +" view="+feedback.viewWidth+"x"+feedback.viewHeight
+                    +" lane="+currentLane+" pending="+pendingLane+" observed="+analyzer.observedLane
+                    +" action="+decision.type+" "+decision.reason);
+                lastTraceAt=now;
+            }
             applyDecision(decision, now);
 
             if (decision.urgent || now - lastStatusAt > 650) {
@@ -238,6 +282,7 @@ public final class AutoService extends Service {
                 lastStatusAt = now;
             }
         } catch (Throwable e) {
+            RunTrace.event("FRAME_ERROR "+e);
             if (SystemClock.uptimeMillis() - lastStatusAt > 1000) {
                 notifyText("frame error: " + message(e));
                 lastStatusAt = SystemClock.uptimeMillis();
@@ -263,12 +308,15 @@ public final class AutoService extends Service {
         GameFeedback current=access.read();
         if(!current.targetVisible || current.paused || current.gameOver)return;
         if(!timing.allow(d.type,current,SystemClock.uptimeMillis()))return;
-        if(d.type==GameAnalyzer.Type.DRILL && current.mode!=GameFeedback.Mode.READY)return;
+        if((d.type==GameAnalyzer.Type.DRILL||d.type==GameAnalyzer.Type.CANCEL)
+                &&SystemClock.uptimeMillis()-current.modeAt>450){RunTrace.event("BLOCK stale mode");return;}
+        if(d.type==GameAnalyzer.Type.DRILL && (current.mode!=GameFeedback.Mode.READY||current.heat<0||current.heat>=48))return;
         if(d.type==GameAnalyzer.Type.CANCEL && current.mode!=GameFeedback.Mode.ACTIVE)return;
         switch (d.type) {
             case DRILL, CANCEL -> {
                 long requestedAt=SystemClock.uptimeMillis();
                 int rc = tapControl(CONTROL_DRILL);
+                RunTrace.event("INPUT "+d.type+" rc="+rc+" elapsed="+(SystemClock.uptimeMillis()-requestedAt));
                 if(rc==0){lastDrillAt=SystemClock.uptimeMillis();timing.accepted(d.type,requestedAt);analyzer.accepted(d);}
             }
             case LEFT -> move(-1, d.urgent, now);
@@ -279,13 +327,14 @@ public final class AutoService extends Service {
 
     private void move(int direction, boolean urgent, long now) throws Exception {
         long minGap = urgent ? 138 : 150;
-        if (now - lastMoveAt < minGap) return;
+        if (now - lastMoveAt < minGap || pendingLane>=0) return;
         int next = Math.max(0, Math.min(2, currentLane + Integer.signum(direction)));
         if (next == currentLane) return;
 
         int rc = tapControl(direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
+        RunTrace.event("INPUT MOVE from="+currentLane+" to="+next+" rc="+rc);
         if (rc == 0) {
-            currentLane = next;
+            currentLane = next;pendingLane=next;laneVotes=0;
             lastMoveAt = SystemClock.uptimeMillis();
         } else if (now - lastStatusAt > 350) {
             notifyText("MOVE tap rejected rc=" + rc);
@@ -327,6 +376,9 @@ public final class AutoService extends Service {
             stopSelf();
             return;
         }
+        mainHandler.removeCallbacks(captureWatchdog);
+        RunTrace.event("STOP depth="+observedDepth);
+        RunTrace.close();
         captureStarted.set(false);
         firstFrameSeen.set(false);
         try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}

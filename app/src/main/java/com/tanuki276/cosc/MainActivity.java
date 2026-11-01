@@ -68,6 +68,11 @@ public final class MainActivity extends Activity {
 
         root.addView(start);
         root.addView(stop);
+        Button report=button("実行記録を共有");
+        report.setOnClickListener(v->{Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain")
+                .putExtra(Intent.EXTRA_SUBJECT,"COSC diagnostics").putExtra(Intent.EXTRA_TEXT,RunTrace.report(this));
+            startActivity(Intent.createChooser(share,"実行記録を共有"));});
+        root.addView(report);
 
         TextView note = new TextView(this);
         note.setText("Enable COSC in Accessibility, then start AUTO and allow full-screen capture. COSC reads CO-DUG’s visible HUD and canvas. Shizuku is not required in this version. CO-DUG itself is not modified.");
