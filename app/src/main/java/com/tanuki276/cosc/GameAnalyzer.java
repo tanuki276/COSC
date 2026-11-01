@@ -50,18 +50,21 @@ final class GameAnalyzer {
     private final List<VisualTrack> tracks=new ArrayList<>();
     private int sequence,previousDepth,previousWidth,runId=-1;
     private long previousFrame,pulseAt,pausedAt;
-    private int pauseDepth;
-    private float opticalVelocity;
+    private boolean resumeSnapshotUsable;
+    private float opticalVelocity, previousImageDepth=Float.NaN;
     int observedLane=-1;
     String scene="";
     GameFeedback usedFeedback;
     long decisionAt;
-    void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;observedLane=-1;pulseAt=0;pausedAt=0;}
+    void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;previousImageDepth=Float.NaN;resumeSnapshotUsable=false;observedLane=-1;pulseAt=0;pausedAt=0;}
     void pause(GameFeedback f,long frame){
         if(pausedAt!=0)return;
-        pausedAt=previousFrame>0?previousFrame:frame;pauseDepth=f.depth;
-        float progress=Math.max(0,Math.min(6,f.depth-previousDepth))*3.25f;
         float v=opticalVelocity>0?opticalVelocity:f.speed()*3.25f;
+        float depthAtImage=Float.isNaN(previousImageDepth)?previousDepth:previousImageDepth;
+        float progress=Math.max(0,f.depth-depthAtImage)*3.25f;
+        resumeSnapshotUsable=previousFrame>0&&frame-previousFrame<800&&observedLane>=0
+                &&progress<=v*.8f&&frame-f.depthAt<450;
+        pausedAt=previousFrame>0?previousFrame:frame;
         for(VisualTrack t:tracks){t.distance=t.predict(pausedAt,v)-progress;t.at=pausedAt;}
     }
     void accepted(Decision d) { }
@@ -92,7 +95,7 @@ final class GameAnalyzer {
             if(pulseAt>0)pulseAt+=elapsed;
             previousFrame=resumed;pausedAt=0;
         }
-        if(f.depth+20<previousDepth || previousWidth!=b.getWidth() || frame-previousFrame>1500)reset();
+        if(f.depth+20<previousDepth || previousWidth!=b.getWidth())reset();
         previousDepth=f.depth;previousWidth=b.getWidth();
         int size=b.getWidth()*b.getHeight();
         if(pixels==null||pixels.length!=size)pixels=new int[size];
@@ -162,7 +165,7 @@ final class GameAnalyzer {
             float d=t.predict(now,velocity);
             ObjectHit h=new ObjectHit(body+d*scale,t.ore);h.rowIndex=t.id;objects[t.lane].add(h);
         }
-        previousFrame=frame;
+        previousFrame=frame;previousImageDepth=f.imageDepth();
         for(List<ObjectHit> list:objects)list.sort(Comparator.comparingDouble(t->t.y));
         ObjectHit here=next(objects[lane],body-10*scale);
         float distance=here==null?Float.POSITIVE_INFINITY:(here.y-body)/scale;
@@ -183,7 +186,7 @@ final class GameAnalyzer {
         // missed, even if the rock is still above that boundary right now.
         boolean missed=arrival<tip-24;
         if(fresh&&f.mode==GameFeedback.Mode.ACTIVE){
-            if(f.heat>=74)return new Decision(Type.CANCEL,"heat guard: "+scene);
+            if(f.heat+80*((now-f.modeAt)/1000f+latency)>=88)return new Decision(Type.CANCEL,"heat guard: "+scene);
             VisualTrack nearest=null;
             if(here!=null)for(VisualTrack t:tracks)if(t.id==here.rowIndex){nearest=t;break;}
             // An already-running drill does not incur a new activation latency.
@@ -198,7 +201,13 @@ final class GameAnalyzer {
             }
         }
         boolean ready=fresh&&f.mode==GameFeedback.Mode.READY&&f.heat>=0&&f.heat<48;
-        int pairLane=pairRoute(objects,lane,body,tip,velocity,latency,scale,ready,f);
+        // Use every visible row and the time needed to confirm a move. Do not
+        // assume a second pulse or a successful first hit to make a route safe.
+        float secondDistance=Float.POSITIVE_INFINITY;
+        if(here!=null)for(ObjectHit h:objects[lane])if(h.y>here.y+40*scale){secondDistance=(h.y-body)/scale;break;}
+        boolean tightPair=(secondDistance-distance)/velocity<1.15f;
+        int pairLane=(!ready||missed||tightPair)
+                ?LaneSafety.choose(distances(objects,body,scale),lane,velocity,latency+.06f,f.framePeriodMs/1000f):lane;
         if(pairLane!=lane&&distance<tip+velocity*1.0f){
             Decision d=new Decision(pairLane<lane?Type.LEFT:Type.RIGHT,0,0,"two-row route: "+scene,missed);
             d.lane=lane;return d;
@@ -231,59 +240,39 @@ final class GameAnalyzer {
         return Decision.none(scene+" HUD="+f.mode+" fresh="+fresh);
     }
 
-    private int pairRoute(List<ObjectHit>[] hits,int lane,float body,float tip,float v,float latency,float scale,boolean ready,GameFeedback f){
-        float first=Float.POSITIVE_INFINITY,second=Float.POSITIVE_INFINITY;
-        for(List<ObjectHit> list:hits)for(ObjectHit h:list){float d=(h.y-body)/scale;if(d>20)first=Math.min(first,d);}
-        if(!Float.isFinite(first))return lane;
-        for(List<ObjectHit> list:hits)for(ObjectHit h:list){float d=(h.y-body)/scale;if(d>first+55)second=Math.min(second,d);}
-        if(!Float.isFinite(second))return lane;
-        boolean[] row1=new boolean[3],row2=new boolean[3];
-        for(int l=0;l<3;l++)for(ObjectHit h:hits[l]){
-            float d=(h.y-body)/scale;if(Math.abs(d-first)<25)row1[l]=true;if(Math.abs(d-second)<25)row2[l]=true;
+    private float[][] distances(List<ObjectHit>[] hits,float body,float scale){
+        float[][] result=new float[3][];
+        for(int l=0;l<3;l++){
+            result[l]=new float[hits[l].size()];
+            for(int i=0;i<result[l].length;i++)result[l][i]=(hits[l].get(i).y-body)/scale;
         }
-        int best=lane;float own=pairCost(lane,row1,row2,first,second,tip,v,latency,ready,f);
-        float cost=own;
-        // Only leave a usable current route to prevent a predicted collision,
-        // not to chase points or save a harmless activation.
-        if(own<50)return lane;
-        for(int candidate=Math.max(0,lane-1);candidate<=Math.min(2,lane+1);candidate++){
-            if(candidate==lane||!safeLanding(hits[candidate],body,tip,v,latency+.06f,scale))continue;
-            float c=pairCost(candidate,row1,row2,first,second,tip,v,latency,ready,f)+1;
-            if(c<cost){cost=c;best=candidate;}
-        }
-        return best;
+        return result;
     }
-    private float pairCost(int firstLane,boolean[] row1,boolean[] row2,float first,float second,float tip,float v,float latency,boolean ready,GameFeedback f){
-        float firstWindow=(first-tip-15)/v;
-        boolean recover=f.mode==GameFeedback.Mode.COOLING&&f.heat<48&&f.cooldownSeconds+latency+.10f<firstWindow;
-        boolean firstBreak=(ready||recover)&&(first-tip+24)/v>=latency;
-        float firstCost=row1[firstLane]?(firstBreak?4:100):0;
-        float nextWindow=(second-tip-15)/v;
-        boolean secondBreak=ready||recover;
-        if(row1[firstLane]&&firstBreak){
-            // Same base pulse, or a complete pulse + conservative cooldown.
-            secondBreak=nextWindow<=Math.max(0,firstWindow)+.45f
-                    ||nextWindow>=Math.max(0,firstWindow)+.5f+.48f+latency;
-        }
-        float best=Float.POSITIVE_INFINITY;
-        for(int next=Math.max(0,firstLane-1);next<=Math.min(2,firstLane+1);next++){
-            if(next!=firstLane){
-                float earliest=Math.max(.28f+latency,row1[next]?(first+20)/v+latency:latency+.28f);
-                if(earliest>(second-20)/v)continue;
+    Decision afterMenuResume(int lane,GameFeedback f,long now){
+        if(pausedAt==0||!resumeSnapshotUsable||f.runId!=runId||f.paused||f.gameOver
+                ||f.resumeAt==0||now-f.resumeAt>180||lane!=observedLane)return Decision.none("resume awaiting image");
+        float v=opticalVelocity>0?opticalVelocity:f.speed()*3.25f;
+        float delay=Math.max(.10f,f.inputLatencyMs/1000f)+.06f;
+        float[][] rocks=new float[3][];
+        float nearest=Float.POSITIVE_INFINITY;
+        for(int l=0;l<3;l++){
+            ArrayList<Float> values=new ArrayList<>();
+            for(VisualTrack t:tracks)if(!t.cleared&&t.lane==l){
+                float d=t.distance-v*Math.max(0,(now-f.resumeAt)/1000f);
+                values.add(d);if(l==lane&&d>=-22)nearest=Math.min(nearest,d);
             }
-            float c=row2[next]?(secondBreak?4:100):0;
-            best=Math.min(best,c+(next==firstLane?0:.5f));
+            rocks[l]=new float[values.size()];for(int i=0;i<values.size();i++)rocks[l][i]=values.get(i);
         }
-        return firstCost+best;
+        if(nearest>67+f.tipReach+v*.65f)return Decision.none("resume clear");
+        int next=LaneSafety.choose(rocks,lane,v,delay,f.framePeriodMs/1000f);
+        if(next==lane)return Decision.none("resume needs fresh image");
+        decisionAt=now;
+        Decision d=new Decision(next<lane?Type.LEFT:Type.RIGHT,0,0,"resume snapshot escape",true);d.lane=lane;return d;
     }
     private boolean safeLanding(List<ObjectHit> hits,float body,float tip,float velocity,float delay,float scale){
-        for(ObjectHit hit:hits){
-            float atArrival=(hit.y-body)/scale-velocity*delay;
-            // Include the actual +/-13 body hit zone and a dispatch/capture
-            // margin. Never enter a lane containing an already missed rock.
-            if(atArrival>=-20&&atArrival<Math.max(tip-24,20+velocity*.35f))return false;
-        }
-        return true;
+        float[] rocks=new float[hits.size()];
+        for(int i=0;i<rocks.length;i++)rocks[i]=(hits.get(i).y-body)/scale;
+        return LaneSafety.clear(rocks,velocity,0,delay+.35f);
     }
     private float laneCost(List<ObjectHit> hits, float body, float tip, float horizon, boolean ready, float scale) {
         float cost = 0;

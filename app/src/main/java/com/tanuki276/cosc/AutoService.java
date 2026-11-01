@@ -67,7 +67,8 @@ public final class AutoService extends Service {
     private int seenRunId;
     private int pendingLane=-1,laneVotes;
     private long lastTraceAt;
-    private int observedDepth;
+    private int observedDepth, previousHp=-1;
+    private long lastResumeAt;
     private int confirmedDrillFrames;
     private long lastMoveAt;
     private long lastDrillAt;
@@ -110,7 +111,7 @@ public final class AutoService extends Service {
         RunTrace.start(this);
         lastFrameAt=0;lastImageAt=SystemClock.uptimeMillis();framePeriodMs=83;pendingLane=-1;laneVotes=0;
         currentLane = 1;
-        observedDepth = 0;
+        observedDepth = 0;previousHp=-1;lastResumeAt=0;
         confirmedDrillFrames = 0;
         lastMoveAt = 0;
         lastOverlayTapAt = 0;
@@ -223,16 +224,26 @@ public final class AutoService extends Service {
             if(!feedback.targetVisible)return;
             if(feedback.runId!=seenRunId){
                 seenRunId=feedback.runId;analyzer.reset();timing.reset();currentLane=1;pendingLane=-1;
-                lastMoveAt=0;RunTrace.event("NEW_RUN id="+seenRunId);
+                lastMoveAt=0;previousHp=-1;RunTrace.event("NEW_RUN id="+seenRunId);
             }
             if(feedback.gameOver){RunTrace.event("GAME_OVER depth="+feedback.depth+" hp="+feedback.hp+" mode="+feedback.mode+" heat="+feedback.heat);notifyText("Stopped: collision/game over at "+feedback.depth+"m");mainHandler.post(this::stopAutomation);return;}
             long now=SystemClock.uptimeMillis();
             observedDepth=feedback.depth;
+            if(previousHp>=0&&feedback.hp>=0&&feedback.hp<previousHp)
+                RunTrace.event("DAMAGE depth="+feedback.depth+" hp="+previousHp+"->"+feedback.hp+" lastScene="+analyzer.scene);
+            if(feedback.hp>=0)previousHp=feedback.hp;
             // Menus and unavailable calibration need no screen-sized bitmap.
             if(feedback.paused)analyzer.pause(feedback,capturedAt);
             if(now-lastMenuCheckAt>400&&now-lastOverlayTapAt>800&&checkMenu(access,now)){
                 lastOverlayTapAt=SystemClock.uptimeMillis();
-                RunTrace.event("MENU touch dispatched depth="+feedback.depth);return;
+                RunTrace.event("MENU touch dispatched depth="+feedback.depth);
+                GameFeedback resumed=feedbackForFrame(access,capturedAt);
+                if(resumed.resumeAt>lastResumeAt){
+                    lastResumeAt=resumed.resumeAt;timing.resume(resumed.resumeAt);
+                    GameAnalyzer.Decision escape=analyzer.afterMenuResume(currentLane,resumed,SystemClock.uptimeMillis());
+                    applyDecision(escape,SystemClock.uptimeMillis());
+                }
+                return;
             }
             if(feedback.resumeAt>0&&capturedAt<feedback.resumeAt+32)return;
             if(feedback.cssScale<=0){
@@ -272,6 +283,11 @@ public final class AutoService extends Service {
                         RunTrace.event("MOVE not reflected actual="+currentLane);
                     }
                 }
+            }
+            if(pendingLane>=0&&now-lastMoveAt>900){
+                RunTrace.event("MOVE_UNCONFIRMED target="+pendingLane+" observed="+analyzer.observedLane);
+                access.pauseForCaptureFailure();notifyText("Stopped: lane confirmation lost; pause requested");
+                mainHandler.post(this::stopAutomation);return;
             }
             // Dispatch before writing/flushing the diagnostic record.
             applyDecision(decision,now);
@@ -317,6 +333,10 @@ public final class AutoService extends Service {
         GameFeedback current=access.read();
         if(!current.targetVisible || current.paused || current.gameOver)return;
         if(!timing.allow(d.type,current,SystemClock.uptimeMillis()))return;
+        // Keep the confirmed origin lane until vision observes the destination.
+        // In particular, do not cancel a pulse using the unconfirmed target lane.
+        if(pendingLane>=0)return;
+        if(d.type!=GameAnalyzer.Type.NONE&&SystemClock.uptimeMillis()-analyzer.decisionAt>180){RunTrace.event("BLOCK expired decision");return;}
         if((d.type==GameAnalyzer.Type.DRILL||d.type==GameAnalyzer.Type.CANCEL)
                 &&SystemClock.uptimeMillis()-current.modeAt>450){RunTrace.event("BLOCK stale mode");return;}
         if(d.type==GameAnalyzer.Type.DRILL && (current.mode!=GameFeedback.Mode.READY||current.heat<0||current.heat>=48))return;
@@ -343,7 +363,7 @@ public final class AutoService extends Service {
         int rc = tapControl(direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
         RunTrace.event("INPUT MOVE from="+currentLane+" to="+next+" rc="+rc);
         if (rc >= 0) {
-            currentLane = next;pendingLane=next;laneVotes=0;
+            pendingLane=next;laneVotes=0;
             lastMoveAt = SystemClock.uptimeMillis();
         } else if (now - lastStatusAt > 350) {
             notifyText("MOVE tap rejected rc=" + rc);
@@ -353,7 +373,7 @@ public final class AutoService extends Service {
 
     private int tapControl(int control) throws Exception {
         GameAccessService access = GameAccessService.instance;
-        return access == null ? -3 : access.tapControl(control);
+        return access == null ? -3 : access.tapControl(control,analyzer.decisionAt+180);
     }
 
     private GameFeedback feedbackForFrame(GameAccessService access,long capturedAt){

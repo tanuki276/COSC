@@ -30,7 +30,7 @@ public final class GameAccessService extends AccessibilityService {
     private final Rect[] controls={new Rect(),new Rect(),new Rect()};
     private AccessibilityNodeInfo menu,pauseControl;
     private final List<AccessibilityNodeInfo> hudNodes=new ArrayList<>();
-    private long lastTreeAt,controlsAt;
+    private long lastTreeAt,controlsAt,observationFloor,hpAt;
     private String pendingMenu="";
     private boolean pendingMenuPaused;
     private long pendingMenuAt;
@@ -104,6 +104,7 @@ public final class GameAccessService extends AccessibilityService {
     private void parse(String text,long at){
         text=text.replace('\u00a0',' ').trim();
         synchronized(lock){
+            if(at<observationFloor)return;
             Matcher m=HEAT.matcher(text);
             if(m.matches()&&at>=latest.modeAt){
                 String state=m.group(2);
@@ -114,7 +115,7 @@ public final class GameAccessService extends AccessibilityService {
                 latest.heat=state.endsWith("%")?Integer.parseInt(state.substring(0,state.length()-1)):
                         m.group(1).equals("GREEN")?21:m.group(1).equals("YELLOW")?47:m.group(1).equals("ORANGE")?71:99;
             }
-            m=HP.matcher(text);if(m.matches())latest.hp=Integer.parseInt(m.group(1));
+            m=HP.matcher(text);if(m.matches()&&at>=hpAt){latest.hp=Integer.parseInt(m.group(1));hpAt=at;}
             m=DEPTH.matcher(text);
             if(m.matches()&&at>=latest.depthAt){
                 int depth=Integer.parseInt(m.group(1).replace(",",""));
@@ -149,7 +150,7 @@ public final class GameAccessService extends AccessibilityService {
             if(!target)return;
             collect(r,nodes);
             synchronized(lock){for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();}
-            AccessibilityNodeInfo best=null;int score=0;
+            AccessibilityNodeInfo best=null;int score=0;String bestLabel="";
             Rect[] found={new Rect(),new Rect(),new Rect()};Rect viewport=new Rect();
             AccessibilityNodeInfo[] buttons=new AccessibilityNodeInfo[3];
             for(AccessibilityNodeInfo n:nodes){
@@ -171,16 +172,15 @@ public final class GameAccessService extends AccessibilityService {
                 }
                 if(!isButton)continue;
                 String button=nodeText(n);int s=menuScore(button);
-                if(s>score){best=n;score=s;menuLabel=button;}
+                if(s>score&&n.isEnabled()){best=n;score=s;bestLabel=button;}
             }
             if(now-lastNodeTrace>5000)lastNodeTrace=now;
             synchronized(lock){
-                if(menu!=null)menu.recycle();menu=best==null?null:AccessibilityNodeInfo.obtain(best);
+                if(menu!=null)menu.recycle();menu=best==null?null:AccessibilityNodeInfo.obtain(best);menuLabel=bestLabel;
                 if(sampledAt>=latest.resumeAt)latest.paused=best!=null&&!menuLabel.contains("x2 ON");
                 if(!pendingMenu.isEmpty()&&sampledAt>pendingMenuAt){
                     if(best==null||!menuLabel.equals(pendingMenu)){
                         if(pendingMenu.contains("ロングビット"))latest.tipReach=Math.min(34,latest.tipReach+8);
-                        if(pendingMenuPaused){latest.depthAt=sampledAt;depthSamples.clear();latest.speed=Float.NaN;}
                         RunTrace.event("MENU_CONFIRMED label="+pendingMenu);
                         pendingMenu="";
                     }else if(now-pendingMenuAt>1200){
@@ -207,7 +207,8 @@ public final class GameAccessService extends AccessibilityService {
             }
         }finally{for(AccessibilityNodeInfo n:nodes)n.recycle();r.recycle();}
     }
-    private static int menuScore(String t){
+    private int menuScore(String t){
+        synchronized(lock){if(latest.hp>=0&&latest.hp<=2&&t.contains("現地修理"))return 150;}
         return t.contains("x2 ON")?10:t.contains("掘削を開始")||t.contains("もう一回")||t.contains("掘削を再開")?200:
                 t.contains("冷却フィン")?100:t.contains("高速クラッチ")?95:
                 t.contains("現地修理")?90:t.contains("増設フレーム")?80:t.contains("ロングビット")?70:
@@ -219,6 +220,7 @@ public final class GameAccessService extends AccessibilityService {
     // Clear only observations that can belong to an earlier run. Geometry is
     // retained, but fresh HUD readings are required before the first toggle.
     void beginRun(){synchronized(lock){
+        observationFloor=SystemClock.uptimeMillis();hpAt=0;
         latest.mode=GameFeedback.Mode.UNKNOWN;latest.modeAt=0;latest.depthAt=0;latest.heat=-1;
         latest.hp=-1;latest.depth=0;latest.gameOver=false;latest.tipReach=0;
         latest.speed=Float.NaN;depthSamples.clear();pendingMenu="";latest.resumeAt=0;
@@ -232,6 +234,7 @@ public final class GameAccessService extends AccessibilityService {
         try{
             if(!action.refresh()||!action.isVisibleToUser()
                     ||!"android.widget.Button".equals(String.valueOf(action.getClassName())))return false;
+            if(!nodeText(action).equals(chosen))return false;
             Rect box=new Rect();action.getBoundsInScreen(box);if(box.isEmpty())return false;
             int rc=tap(box.centerX(),box.centerY());
             RunTrace.event("MENU_TOUCH label="+chosen+" bounds="+box+" rc="+rc);
@@ -239,13 +242,17 @@ public final class GameAccessService extends AccessibilityService {
             synchronized(lock){
                 pendingMenu=chosen;pendingMenuAt=SystemClock.uptimeMillis();pendingMenuPaused=wasPaused;
                 if(rc==0&&(chosen.contains("掘削を開始")||chosen.contains("もう一回"))){
-                    latest.runId++;latest.depth=0;latest.tipReach=0;latest.gameOver=false;
+                    observationFloor=SystemClock.uptimeMillis();hpAt=0;
+                    latest.runId++;latest.depthAt=0;latest.depth=0;latest.tipReach=0;latest.gameOver=false;
                     latest.mode=GameFeedback.Mode.UNKNOWN;latest.modeAt=0;latest.hp=-1;
                     latest.speed=Float.NaN;depthSamples.clear();
                 }
             }
             if(wasPaused&&rc==0){
-                synchronized(lock){latest.paused=false;latest.resumeAt=SystemClock.uptimeMillis();}
+                synchronized(lock){
+                    latest.paused=false;latest.resumeAt=SystemClock.uptimeMillis();
+                    depthSamples.clear(); // do not derive speed from time spent in the menu
+                }
                 Handler h=hudWorker;if(h!=null)h.post(this::refreshHud);
                 Handler w=worker;if(w!=null)w.postDelayed(this::sampleTree,80);
             }
@@ -278,6 +285,9 @@ public final class GameAccessService extends AccessibilityService {
         finally{n.recycle();}
     }
     int tapControl(int control)throws InterruptedException{
+        return tapControl(control,SystemClock.uptimeMillis()+180);
+    }
+    int tapControl(int control,long deadline)throws InterruptedException{
         Rect box;
         synchronized(lock){
             if(!latest.targetVisible||latest.paused||latest.gameOver)return -5;
@@ -287,16 +297,19 @@ public final class GameAccessService extends AccessibilityService {
         // Rectangles come from a recent concrete-button tree sample. Virtual
         // AX node identities may expire on every DOM update; do not drop a shot
         // just because a cached node cannot refresh. tap() rechecks foreground.
-        int rc=box.isEmpty()?-4:tap(box.centerX(),box.centerY());
+        int rc=box.isEmpty()?-4:tap(box.centerX(),box.centerY(),deadline);
         RunTrace.event("CONTROL_TOUCH index="+control+" bounds="+box+" rc="+rc);
         return rc;
     }
     // 0 = gesture completed; 1 = dispatched, completion still unknown.
     // A timeout before dispatch expires the queued request permanently.
     int tap(int x,int y)throws InterruptedException{
+        return tap(x,y,SystemClock.uptimeMillis()+500);
+    }
+    private int tap(int x,int y,long deadline)throws InterruptedException{
+        if(SystemClock.uptimeMillis()>=deadline)return -3;
         CountDownLatch done=new CountDownLatch(1);
         java.util.concurrent.atomic.AtomicInteger state=new java.util.concurrent.atomic.AtomicInteger(0);
-        long deadline=SystemClock.uptimeMillis()+500;
         Runnable request=()->{
             if(state.get()!=0||SystemClock.uptimeMillis()>=deadline){done.countDown();return;}
             AccessibilityNodeInfo r=root(false);
@@ -316,7 +329,7 @@ public final class GameAccessService extends AccessibilityService {
             }catch(RuntimeException failure){state.set(3);done.countDown();RunTrace.event("TOUCH_ERROR "+failure);}
         };
         main.post(request);
-        try{done.await(500,TimeUnit.MILLISECONDS);}
+        try{done.await(Math.max(1,deadline-SystemClock.uptimeMillis()+60),TimeUnit.MILLISECONDS);}
         catch(InterruptedException interrupted){Thread.currentThread().interrupt();}
         state.compareAndSet(0,4);main.removeCallbacks(request);
         int result=state.get();

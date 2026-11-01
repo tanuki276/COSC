@@ -21,6 +21,24 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
+- Retains the confirmed origin lane until a destination is observed. No second
+  move or drill toggle is sent while movement is unconfirmed; prolonged loss of
+  lane confirmation requests pause and stops rather than inventing a lane.
+- Checks whole lane-occupancy intervals and adjacent-lane reachability across
+  visible rows over a bounded two-second horizon. A rock crossing before the
+  end of a movement blocks that destination. Destruction is not assumed when
+  scoring escape paths.
+- Can send a conservative escape immediately after an upgrade selection using
+  a recent frozen snapshot, without waiting for the next capture. Fresh images
+  remain authoritative after resume. Keeps measured speed across upgrade pauses.
+- Rejects older HP observations, updates bit reach after observed selection confirmation,
+  and prioritizes repair when HP is two or less. Adds DAMAGE records with the
+  preceding scene.
+- Exports immutable log files with temporary read-only URI permission instead
+  of placing a long transcript in the share intent. The report menu also offers
+  document saving and a short clipboard tail. Exports include current and
+  preceding log segments; opening another run preserves the preceding log.
+
 - Uses current decision time and a HUD snapshot refreshed after pixel detection;
   processing time is included in the obstacle projection. Diagnostic frames
   include decision age, pixel sampling time, and vision time.
@@ -43,8 +61,6 @@ editing, APK patching, or injection into CO-DUG is used.
   clock to the completed resume touch. Refreshes the HUD/menu immediately after
   selection, and rejects pre-resume/transition frames.
 - Retains rock side silhouettes near the drill after resume.
-- Evaluates the next two rows with adjacent-lane reachability, landing safety,
-  pulse coverage and recovery time before committing to a route.
 - Detects all eight rock fill palettes, including dark basalt/void/error stone.
 - Tracks rock/ore centres directly across captured images, estimates scroll speed,
   and retains occluded targets. Rounded/asynchronous HUD depth does not position rocks.
@@ -81,8 +97,8 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.11.0 is a control and diagnostic revision. Physical-device survival to
-100000 m has not been verified. Validation for this revision consists of RGBA pixel-layout checks and an APK
+Version 0.12.0 is a control and diagnostic revision. Physical-device survival to
+100000 m has not been verified. Validation for this revision consists of RGBA pixel-layout and lane-occupancy arithmetic checks, plus an APK
 build. The replay and emulator workflows are manual and have not been run for
 this revision.
 

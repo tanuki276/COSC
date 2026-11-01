@@ -7,8 +7,11 @@ final class ControlTiming {
     private float latencyMs = 120;
     float latencyMs() { return latencyMs; }
     void reset() { awaiting=null;sentAt=0;latencyMs=120; }
+    void resume(long at){
+        // Acknowledgement deadlines use game-active time, not time in a choice menu.
+        awaiting=null;sentAt=Math.max(sentAt,at-80);
+    }
     boolean allow(GameAnalyzer.Type type, GameFeedback f, long now) {
-        if(type==GameAnalyzer.Type.LEFT||type==GameAnalyzer.Type.RIGHT)return true;
         if (awaiting != null) {
             long sampleAt=f.modeAt;
             boolean acknowledged=sampleAt >= sentAt && (awaiting == GameAnalyzer.Type.DRILL
@@ -20,7 +23,7 @@ final class ControlTiming {
                     latencyMs=latencyMs*.65f+delay*.35f;
                 }
                 awaiting=null;
-            } else if (now-sentAt < Math.max(700, latencyMs*3)) return false;
+            } else if (now-sentAt < Math.max(700, latencyMs*3)) return type==GameAnalyzer.Type.LEFT||type==GameAnalyzer.Type.RIGHT;
             else awaiting=null;
         }
         return (type != GameAnalyzer.Type.DRILL && type != GameAnalyzer.Type.CANCEL) || now-sentAt >= 80;
