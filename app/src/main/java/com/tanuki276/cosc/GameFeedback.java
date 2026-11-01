@@ -6,7 +6,7 @@ final class GameFeedback {
     Mode mode = Mode.UNKNOWN;
     int heat = -1, hp = -1, depth, tipReach;
     float cooldownSeconds = 1.1f;
-    long observedAt, depthAt, modeAt, frameAt, lastMoveAt;
+    long observedAt, depthAt, modeAt, frameAt, lastMoveAt, resumeAt;
     boolean targetVisible, paused, gameOver;
     float frameDepth = Float.NaN, controlDepth = Float.NaN, speed = Float.NaN;
     float cssScale;
@@ -23,7 +23,7 @@ final class GameFeedback {
         GameFeedback f = new GameFeedback();
         f.mode=mode;f.heat=heat;f.hp=hp;f.depth=depth;f.tipReach=tipReach;
         f.cooldownSeconds=cooldownSeconds;f.observedAt=observedAt;f.depthAt=depthAt;f.modeAt=modeAt;
-        f.frameAt=frameAt;f.lastMoveAt=lastMoveAt;f.targetVisible=targetVisible;f.paused=paused;f.gameOver=gameOver;
+        f.resumeAt=resumeAt;f.frameAt=frameAt;f.lastMoveAt=lastMoveAt;f.targetVisible=targetVisible;f.paused=paused;f.gameOver=gameOver;
         f.frameDepth=frameDepth;f.controlDepth=controlDepth;f.speed=speed;f.cssScale=cssScale;
         f.viewLeft=viewLeft;f.viewTop=viewTop;f.viewWidth=viewWidth;f.viewHeight=viewHeight;
         f.inputLatencyMs=inputLatencyMs;f.framePeriodMs=framePeriodMs;

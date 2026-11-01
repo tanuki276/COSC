@@ -21,6 +21,14 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
+- Freezes obstacle positions through upgrade menus and rebases the tracking
+  clock to the completed resume touch. Refreshes the HUD/menu immediately after
+  selection, and rejects pre-resume/transition frames.
+- Retains rock side silhouettes near the drill after resume.
+- Evaluates the next two rows with adjacent-lane reachability, landing safety,
+  pulse coverage and recovery time before committing to a route.
+
+
 - Detects all eight rock fill palettes, including dark basalt/void/error stone.
 - Tracks rock/ore centres directly across captured images, estimates scroll speed,
   and retains occluded targets. Rounded/asynchronous HUD depth does not position rocks.
@@ -57,7 +65,7 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.8.0 is a control and diagnostic revision. Physical-device survival to
+Version 0.9.0 is a control and diagnostic revision. Physical-device survival to
 100000 m has not been verified. This revision is compiled only; the replay and
 emulator workflows are manual and have not been run for this revision.
 

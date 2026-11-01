@@ -215,7 +215,7 @@ public final class GameAccessService extends AccessibilityService {
     void beginRun(){synchronized(lock){
         latest.mode=GameFeedback.Mode.UNKNOWN;latest.modeAt=0;latest.depthAt=0;latest.heat=-1;
         latest.hp=-1;latest.depth=0;latest.gameOver=false;latest.tipReach=0;
-        latest.speed=Float.NaN;depthSamples.clear();pendingMenu="";
+        latest.speed=Float.NaN;depthSamples.clear();pendingMenu="";latest.resumeAt=0;
     }}
     boolean handleMenu(){
         AccessibilityNodeInfo action;String chosen;boolean wasPaused;
@@ -231,6 +231,11 @@ public final class GameAccessService extends AccessibilityService {
             RunTrace.event("MENU_TOUCH label="+chosen+" bounds="+box+" rc="+rc);
             if(rc<0)return false;
             synchronized(lock){pendingMenu=chosen;pendingMenuAt=SystemClock.uptimeMillis();pendingMenuPaused=wasPaused;}
+            if(wasPaused&&rc==0){
+                synchronized(lock){latest.paused=false;latest.resumeAt=SystemClock.uptimeMillis();}
+                Handler h=hudWorker;if(h!=null)h.post(this::refreshHud);
+                Handler w=worker;if(w!=null)w.post(this::sampleTree);
+            }
             // Acceleration is a live HUD button. Touching it must not erase
             // obstacle tracks, lane acknowledgement, or drill acknowledgement.
             return wasPaused;

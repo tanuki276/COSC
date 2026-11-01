@@ -247,13 +247,14 @@ public final class AutoService extends Service {
             feedback.inputLatencyMs=timing.latencyMs();feedback.framePeriodMs=framePeriodMs;
             observedDepth = feedback.depth;
             if (feedback.mode == GameFeedback.Mode.ACTIVE) confirmedDrillFrames++;
+            if(feedback.paused)analyzer.pause(feedback,capturedAt);
             if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
                 lastOverlayTapAt = now;
                 // Pause/resume keeps tracks safe through analyzer's paused-frame path.
-                pendingLane=-1;
                 RunTrace.event("MENU touch dispatched depth="+feedback.depth);
                 return;
             }
+            if(feedback.resumeAt>0&&capturedAt<feedback.resumeAt+32)return;
             if(feedback.cssScale<=0){RunTrace.event("WAIT control calibration");return;}
             GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, feedback, now);
             if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>220){
