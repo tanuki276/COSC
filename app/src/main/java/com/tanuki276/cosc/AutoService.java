@@ -5,10 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.ComponentName;
 import android.content.Intent;
-import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
@@ -25,10 +22,8 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
 
-import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import rikka.shizuku.Shizuku;
 
 public final class AutoService extends Service {
     public static final String ACTION_START = "com.tanuki276.cosc.START";
@@ -44,17 +39,15 @@ public final class AutoService extends Service {
     private static final int CONTROL_DRILL = 1;
     private static final int CONTROL_RIGHT = 2;
 
-    // A drill activation itself adds heat in CO-DUG. Do not pulse/restart it.
-    private static final long MIN_DRILL_ACTIVE_MS = 80;
-    private static final long MAX_DRILL_ACTIVE_MS = 520;
-    private static final int CLEAR_FRAMES_TO_CANCEL = 2;
-    private static final int CLEAR_FRAMES_TO_REARM = 3;
-
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean processingFrame = new AtomicBoolean(false);
     private final AtomicBoolean captureStarted = new AtomicBoolean(false);
     private final AtomicBoolean firstFrameSeen = new AtomicBoolean(false);
     private final GameAnalyzer analyzer = new GameAnalyzer();
+    private final ControlTiming timing = new ControlTiming();
+    private long lastFrameAt;
+    private volatile long lastImageAt;
+    private float framePeriodMs=83;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private HandlerThread captureThread;
@@ -63,52 +56,25 @@ public final class AutoService extends Service {
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
 
-    private volatile ICoscService shell;
     private int pendingResultCode;
     private Intent pendingResultData;
     private int displayWidth;
     private int displayHeight;
     private int densityDpi;
-    private float densityScale;
+    private final RgbaSampler sampler=new RgbaSampler();
+    private int[] samplePixels;
     private int currentLane = 1;
+    private int seenRunId;
+    private int pendingLane=-1,laneVotes;
+    private long lastTraceAt;
+    private int observedDepth, previousHp=-1;
+    private long lastResumeAt;
+    private int confirmedDrillFrames;
     private long lastMoveAt;
     private long lastDrillAt;
-    private long drillStartedAt;
     private long lastStatusAt;
-
-    private boolean drillActive;
-    private boolean drillRearmBlocked;
-    private int drillClearFrames;
-    private int drillRearmClearFrames;
-
-    private final Shizuku.UserServiceArgs userServiceArgs =
-            new Shizuku.UserServiceArgs(new ComponentName("com.tanuki276.cosc", ShellService.class.getName()))
-                    .daemon(false)
-                    .processNameSuffix("shell")
-                    .debuggable(BuildConfig.DEBUG)
-                    .version(BuildConfig.VERSION_CODE);
-
-    private final ServiceConnection connection = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(ComponentName name, IBinder binder) {
-            shell = ICoscService.Stub.asInterface(binder);
-            try {
-                notifyText("INPUT READY · " + shell.ping());
-            } catch (Throwable e) {
-                notifyText("Input service connected, ping failed: " + message(e));
-            }
-            startCaptureAfterInputReady();
-        }
-
-        @Override
-        public void onServiceDisconnected(ComponentName name) {
-            shell = null;
-            if (running.get()) {
-                notifyText("Stopped: Shizuku input service disconnected");
-                stopAutomation();
-            }
-        }
-    };
+    private long lastOverlayTapAt;
+    private long lastMenuCheckAt;
 
     @Override
     public void onCreate() {
@@ -134,48 +100,47 @@ public final class AutoService extends Service {
             return START_NOT_STICKY;
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("Waiting for Shizuku input service…"));
+        startForeground(NOTIFICATION_ID, buildNotification("Starting screen capture + HUD feedback…"));
         if (!running.compareAndSet(false, true)) return START_NOT_STICKY;
 
         pendingResultCode = resultCode;
         pendingResultData = resultData;
         firstFrameSeen.set(false);
-        resetDrillState();
+        analyzer.reset();
+        timing.reset();
+        RunTrace.start(this);
+        lastFrameAt=0;lastImageAt=SystemClock.uptimeMillis();framePeriodMs=83;pendingLane=-1;laneVotes=0;
+        currentLane = 1;
+        observedDepth = 0;previousHp=-1;lastResumeAt=0;
+        confirmedDrillFrames = 0;
+        lastMoveAt = 0;
+        lastOverlayTapAt = 0;
         launchTargetDirect();
 
-        try {
-            if (!Shizuku.pingBinder() || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                throw new IllegalStateException("Shizuku permission is required");
-            }
-            Shizuku.bindUserService(userServiceArgs, connection);
-        } catch (Throwable e) {
-            notifyText("Stopped: " + message(e));
+        if (GameAccessService.instance == null) {
+            notifyText("Stopped: enable COSC Accessibility feedback");
             stopAutomation();
             return START_NOT_STICKY;
         }
-
-        mainHandler.postDelayed(() -> {
-            if (running.get() && shell == null && !captureStarted.get()) {
-                notifyText("Stopped: Shizuku input service did not connect");
-                stopAutomation();
-            }
-        }, 4000);
+        GameAccessService.instance.beginRun();
+        seenRunId=GameAccessService.instance.read().runId;
+        startCaptureAfterInputReady();
 
         return START_NOT_STICKY;
     }
 
     private void startCaptureAfterInputReady() {
-        if (!running.get() || shell == null) return;
+        if (!running.get()) return;
         if (!captureStarted.compareAndSet(false, true)) return;
 
         try {
-            DisplayMetrics dm = getResources().getDisplayMetrics();
+            DisplayMetrics dm = new DisplayMetrics();
+            getSystemService(android.view.WindowManager.class).getDefaultDisplay().getRealMetrics(dm);
             displayWidth = dm.widthPixels;
             displayHeight = dm.heightPixels;
             densityDpi = dm.densityDpi;
-            densityScale = Math.max(0.5f, dm.density);
 
-            captureThread = new HandlerThread("cosc-capture", Thread.MAX_PRIORITY);
+            captureThread = new HandlerThread("cosc-capture", android.os.Process.THREAD_PRIORITY_DEFAULT);
             captureThread.start();
             captureHandler = new Handler(captureThread.getLooper());
 
@@ -205,7 +170,8 @@ public final class AutoService extends Service {
             );
             if (virtualDisplay == null) throw new IllegalStateException("VirtualDisplay could not start");
 
-            try { shell.launchTarget(); } catch (Throwable ignored) { launchTargetDirect(); }
+            mainHandler.postDelayed(captureWatchdog,500);
+            launchTargetDirect();
             notifyText("VISION+TOUCH READY · waiting for first frame");
 
             mainHandler.postDelayed(() -> {
@@ -220,192 +186,250 @@ public final class AutoService extends Service {
         }
     }
 
+    private final Runnable captureWatchdog=new Runnable(){public void run(){
+        if(!running.get())return;
+        if(firstFrameSeen.get()&&SystemClock.uptimeMillis()-lastImageAt>1200){
+            GameAccessService access=GameAccessService.instance;
+            GameFeedback f=access==null?null:access.read();
+            if(f!=null&&f.targetVisible&&!f.paused&&!f.gameOver){
+                boolean paused=access.pauseForCaptureFailure();
+                RunTrace.event("CAPTURE_TIMEOUT pauseAccepted="+paused);
+                notifyText("Stopped: capture stalled. Pause requested; restart AUTO.");stopAutomation();return;
+            }
+        }
+        mainHandler.postDelayed(this,500);
+    }};
+
     private void onImageAvailable(ImageReader reader) {
         if (!running.get()) return;
-        Image image = reader.acquireLatestImage();
+        Image image;
+        try{image=reader.acquireLatestImage();}catch(IllegalStateException closed){return;}
         if (image == null) return;
         firstFrameSeen.set(true);
+        lastImageAt=SystemClock.uptimeMillis();
         if (!processingFrame.compareAndSet(false, true)) {
             image.close();
             return;
         }
 
         Bitmap frame = null;
-        Bitmap scaled = null;
+        long acquiredAt=SystemClock.uptimeMillis();
+        long ageNanos=System.nanoTime()-image.getTimestamp();
+        long capturedAt=ageNanos>=0&&ageNanos<2_000_000_000L?acquiredAt-ageNanos/1_000_000L:acquiredAt;
         try {
-            frame = imageToBitmap(image);
-            if (frame == null) return;
-
-            int targetWidth = Math.min(720, frame.getWidth());
-            int targetHeight = Math.max(1, Math.round(frame.getHeight() * (targetWidth / (float) frame.getWidth())));
-            scaled = frame.getWidth() == targetWidth
-                    ? frame
-                    : Bitmap.createScaledBitmap(frame, targetWidth, targetHeight, false);
-
-            float captureScale = scaled.getWidth() / (float) Math.max(1, displayWidth);
-            float frameDensity = Math.max(0.5f, densityScale * captureScale);
-            long now = SystemClock.uptimeMillis();
-            GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, now - lastDrillAt);
-            applyDecision(decision, now);
+            if(acquiredAt-capturedAt>250){RunTrace.event("DROP stale frame age="+(acquiredAt-capturedAt));return;}
+            GameAccessService access=GameAccessService.instance;
+            if(access==null)throw new IllegalStateException("Enable COSC Accessibility feedback");
+            GameFeedback feedback=access.read();
+            if(!feedback.targetVisible)return;
+            if(feedback.runId!=seenRunId){
+                seenRunId=feedback.runId;analyzer.reset();timing.reset();currentLane=1;pendingLane=-1;
+                lastMoveAt=0;previousHp=-1;RunTrace.event("NEW_RUN id="+seenRunId);
+            }
+            if(feedback.gameOver){RunTrace.event("GAME_OVER depth="+feedback.depth+" hp="+feedback.hp+" mode="+feedback.mode+" heat="+feedback.heat);notifyText("Stopped: collision/game over at "+feedback.depth+"m");mainHandler.post(this::stopAutomation);return;}
+            long now=SystemClock.uptimeMillis();
+            observedDepth=feedback.depth;
+            if(previousHp>=0&&feedback.hp>=0&&feedback.hp<previousHp)
+                RunTrace.event("DAMAGE depth="+feedback.depth+" hp="+previousHp+"->"+feedback.hp+" lastScene="+analyzer.scene);
+            if(feedback.hp>=0)previousHp=feedback.hp;
+            // Menus and unavailable calibration need no screen-sized bitmap.
+            if(feedback.paused){
+                suspendForMenu(feedback,capturedAt);
+            }
+            if(now-lastMenuCheckAt>200&&now-lastOverlayTapAt>800&&checkMenu(access,now)){
+                lastOverlayTapAt=SystemClock.uptimeMillis();
+                RunTrace.event("MENU touch dispatched depth="+feedback.depth);return;
+            }
+            if(!feedback.paused&&feedback.resumeAt>lastResumeAt){
+                lastResumeAt=feedback.resumeAt;timing.resume(feedback.resumeAt);
+                GameAnalyzer.Decision escape=analyzer.afterMenuResume(currentLane,feedbackForFrame(access,capturedAt),now);
+                applyDecision(escape,now);
+            }
+            if(feedback.resumeAt>0&&capturedAt<feedback.resumeAt+32)return;
+            if(feedback.cssScale<=0){
+                if(now-lastTraceAt>1000){RunTrace.event("WAIT control calibration");lastTraceAt=now;}return;
+            }
+            // After a completed choice, keep sampling for the actual board's
+            // return instead of waiting for the slow full accessibility tree.
+            if(feedback.paused&&(feedback.menuTapAt==0||capturedAt<feedback.menuTapAt+32))return;
+            if(feedback.mode==GameFeedback.Mode.UNKNOWN||feedback.hp<0){
+                if(now-lastTraceAt>1000){RunTrace.event("WAIT live HUD mode="+feedback.mode+" hp="+feedback.hp);lastTraceAt=now;}return;
+            }
+            if(lastFrameAt>0&&capturedAt-lastFrameAt<50)return; // at most 20 perception frames/s
+            if(lastFrameAt>0&&capturedAt>lastFrameAt)
+                framePeriodMs=framePeriodMs*.8f+Math.min(400,capturedAt-lastFrameAt)*.2f;
+            lastFrameAt=capturedAt;
+            long sampleStartedAt=SystemClock.uptimeMillis();
+            CapturedFrame sampled=sampleImage(image,feedback);
+            if(sampled==null)return;
+            frame=sampled.bitmap;
+            long sampleMs=SystemClock.uptimeMillis()-sampleStartedAt;
+            float frameDensity=feedback.cssScale*sampled.scale;
+            feedback=feedbackForFrame(access,capturedAt);
+            if(feedback.paused){
+                int visible=analyzer.visibleLane(frame,frameDensity);
+                if(!access.confirmVisualResume(capturedAt,visible))return;
+                currentLane=visible;pendingLane=-1;laneVotes=0;
+                feedback=feedbackForFrame(access,capturedAt);
+                lastResumeAt=feedback.resumeAt;timing.resume(feedback.resumeAt);
+            }
+            long analysisStartedAt=SystemClock.uptimeMillis();
+            GameAnalyzer.Decision decision=analyzer.analyze(frame,currentLane,frameDensity,feedback,analysisStartedAt,
+                    SystemClock::uptimeMillis,()->feedbackForFrame(access,capturedAt));
+            now=SystemClock.uptimeMillis();
+            long visionMs=now-analysisStartedAt;
+            feedback=analyzer.usedFeedback;
+            observedDepth=feedback.depth;
+            // Pause may have arrived while pixels were being processed. Apply
+            // the refreshed gate before acknowledging or timing out movement.
+            GameFeedback latest=access.read();
+            if(feedback.paused||latest.paused){
+                suspendForMenu(latest.paused?latest:feedback,capturedAt);access.requestFreshTree();return;
+            }
+            if(analyzer.needsMenuScan){
+                access.requestFreshTree();
+                if(now-lastTraceAt>300){RunTrace.event("WAIT obscured board depth="+feedback.depth+" pending="+pendingLane);lastTraceAt=now;}
+                return;
+            }
+            if(feedback.mode==GameFeedback.Mode.ACTIVE)confirmedDrillFrames++;
+            if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>(analyzer.observedLaneExact?16:220)){
+                if(pendingLane<0)currentLane=analyzer.observedLane;
+                else if(analyzer.observedLane==pendingLane){
+                    if(++laneVotes>=1){currentLane=pendingLane;pendingLane=-1;RunTrace.event("MOVE confirmed lane="+currentLane);}
+                }else{
+                    laneVotes=0;
+                    if(capturedAt-lastMoveAt>(analyzer.observedLaneExact?250:500)){
+                        currentLane=analyzer.observedLane;pendingLane=-1;
+                        RunTrace.event("MOVE not reflected actual="+currentLane);
+                    }
+                }
+            }
+            if(pendingLane>=0&&now-lastMoveAt>900){
+                // No visible confirmation is a reason to reacquire the UI,
+                // not to terminate a run at an upgrade overlay.
+                RunTrace.event("WAIT_MOVE_UI target="+pendingLane+" observed="+analyzer.observedLane);
+                access.requestFreshTree();return;
+            }
+            // Dispatch before writing/flushing the diagnostic record.
+            applyDecision(decision,now);
+            if(now-lastTraceAt>100||decision.type!=GameAnalyzer.Type.NONE){
+                long at=analyzer.decisionAt;
+                RunTrace.event("FRAME capture="+capturedAt+" decision="+at+" age="+(at-capturedAt)
+                    +" sample="+frame.getWidth()+"x"+frame.getHeight()+" sampleMs="+sampleMs+" visionMs="+visionMs
+                    +" depth="+feedback.depth+" hp="+feedback.hp
+                    +" depthAge="+(at-feedback.depthAt)+" modeAge="+(at-feedback.modeAt)
+                    +" mode="+feedback.mode+" heat="+feedback.heat+" css="+frameDensity
+                    +" view="+feedback.viewWidth+"x"+feedback.viewHeight
+                    +" lane="+currentLane+" pending="+pendingLane+" observed="+analyzer.observedLane
+                    +" laneMarker="+analyzer.observedLaneExact+" action="+decision.type+" "+decision.reason);
+                lastTraceAt=now;
+            }
 
             if (decision.urgent || now - lastStatusAt > 650) {
-                String guard = drillRearmBlocked ? " · LOCK" : "";
-                notifyText("VISION · L" + (currentLane + 1)
-                        + (drillActive ? " · DRILL" : "")
-                        + guard + " · " + decision.reason);
+                notifyText("VISION · L" + (currentLane + 1) + " · " + decision.reason);
                 lastStatusAt = now;
             }
         } catch (Throwable e) {
+            RunTrace.event("FRAME_ERROR "+e);
             if (SystemClock.uptimeMillis() - lastStatusAt > 1000) {
                 notifyText("frame error: " + message(e));
                 lastStatusAt = SystemClock.uptimeMillis();
             }
         } finally {
-            if (scaled != null && scaled != frame) scaled.recycle();
             if (frame != null) frame.recycle();
             image.close();
             processingFrame.set(false);
         }
     }
 
+    private void suspendForMenu(GameFeedback feedback,long capturedAt){
+        analyzer.pause(feedback,capturedAt);
+        if(pendingLane>=0){RunTrace.event("MENU suspends pending move="+pendingLane);pendingLane=-1;laneVotes=0;}
+    }
+
+    private boolean checkMenu(GameAccessService access, long now) {
+        lastMenuCheckAt = now;
+        return access.handleMenu();
+    }
+
     private void applyDecision(GameAnalyzer.Decision d, long now) throws Exception {
-        ICoscService s = shell;
-        if (s == null) {
-            notifyText("INPUT NOT READY · dropping " + d.type);
-            return;
-        }
-
-        // Once started, keep one drill activation alive. The old code forcibly cancelled
-        // at 145 ms and immediately restarted the same target, which stacked activation heat.
-        if (drillActive) {
-            long activeFor = now - drillStartedAt;
-            boolean targetStillPresent = d.type == GameAnalyzer.Type.DRILL;
-
-            if (targetStillPresent) {
-                drillClearFrames = 0;
-                if (activeFor >= MAX_DRILL_ACTIVE_MS) {
-                    cancelDrillAndBlock(s, now, "safety timeout");
-                }
-            } else {
-                drillClearFrames++;
-                if (activeFor >= MIN_DRILL_ACTIVE_MS && drillClearFrames >= CLEAR_FRAMES_TO_CANCEL) {
-                    cancelDrillAndBlock(s, now, "target clear");
-                }
-            }
-            return;
-        }
-
-        // After cancelling, do not re-fire on the same object/noisy pixels. Require several
-        // consecutive frames with no DRILL request before a new activation can be armed.
-        if (drillRearmBlocked) {
-            if (d.type == GameAnalyzer.Type.DRILL) {
-                drillRearmClearFrames = 0;
-                return;
-            }
-            drillRearmClearFrames++;
-            if (drillRearmClearFrames < CLEAR_FRAMES_TO_REARM) return;
-            drillRearmBlocked = false;
-            drillRearmClearFrames = 0;
-        }
-
+        GameAccessService access = GameAccessService.instance;
+        if (access == null) throw new IllegalStateException("COSC accessibility feedback disconnected");
+        // Rate-limit requests until a NEW HUD frame confirms the last toggle.
+        GameFeedback current=access.read();
+        if(!current.targetVisible || current.paused || current.gameOver)return;
+        if(!timing.allow(d.type,current,SystemClock.uptimeMillis()))return;
+        // Movement waits for confirmation. A protective pulse and thermal
+        // cancellation can still act while either lane may be current.
+        if(pendingLane>=0&&!d.allowDuringMove)return;
+        if(d.type!=GameAnalyzer.Type.NONE&&SystemClock.uptimeMillis()-analyzer.decisionAt>180){RunTrace.event("BLOCK expired decision");return;}
+        if((d.type==GameAnalyzer.Type.DRILL||d.type==GameAnalyzer.Type.CANCEL)
+                &&SystemClock.uptimeMillis()-current.modeAt>450){RunTrace.event("BLOCK stale mode");return;}
+        if(d.type==GameAnalyzer.Type.DRILL && (current.mode!=GameFeedback.Mode.READY||current.heat<0||current.heat>=48))return;
+        if(d.type==GameAnalyzer.Type.CANCEL && current.mode!=GameFeedback.Mode.ACTIVE)return;
         switch (d.type) {
-            case DRILL -> {
-                int rc = tapControl(s, CONTROL_DRILL);
-                if (rc == 0) {
-                    drillActive = true;
-                    drillStartedAt = now;
-                    drillClearFrames = 0;
-                    lastDrillAt = now;
-                } else {
-                    notifyText("DRILL tap rejected rc=" + rc);
-                }
+            case DRILL, CANCEL -> {
+                long requestedAt=SystemClock.uptimeMillis();
+                int rc = tapControl(CONTROL_DRILL);
+                RunTrace.event("INPUT "+d.type+" rc="+rc+" elapsed="+(SystemClock.uptimeMillis()-requestedAt));
+                if(rc>=0){lastDrillAt=SystemClock.uptimeMillis();timing.accepted(d.type,requestedAt);analyzer.accepted(d,lastDrillAt);}
             }
-            case LEFT -> move(-1, d.urgent, now, s);
-            case RIGHT -> move(1, d.urgent, now, s);
-            case TAP -> {
-                int x = Math.round(d.xNorm * displayWidth);
-                int y = Math.round(d.yNorm * displayHeight);
-                int rc = s.tap(x, y);
-                if (rc == 0) currentLane = 1;
-                else notifyText("TAP rejected rc=" + rc);
-            }
-            case NONE -> { }
+            case LEFT -> {if(pendingLane<0&&d.lane>=0)currentLane=d.lane;move(-1,d.urgent,now);}
+            case RIGHT -> {if(pendingLane<0&&d.lane>=0)currentLane=d.lane;move(1,d.urgent,now);}
+            default -> { }
         }
     }
 
-    private void cancelDrillAndBlock(ICoscService s, long now, String reason) throws Exception {
-        int rc = tapControl(s, CONTROL_DRILL);
-        if (rc == 0) {
-            drillActive = false;
-            drillRearmBlocked = true;
-            drillClearFrames = 0;
-            drillRearmClearFrames = 0;
-            lastDrillAt = now;
-            if (now - lastStatusAt > 250) {
-                notifyText("DRILL OFF · " + reason);
-                lastStatusAt = now;
-            }
-        } else if (now - lastStatusAt > 350) {
-            notifyText("DRILL CANCEL tap rejected rc=" + rc);
-            lastStatusAt = now;
-        }
-    }
-
-    private void move(int direction, boolean urgent, long now, ICoscService s) throws Exception {
+    private void move(int direction, boolean urgent, long now) throws Exception {
         long minGap = urgent ? 138 : 150;
-        if (now - lastMoveAt < minGap) return;
+        if (now - lastMoveAt < minGap || pendingLane>=0) return;
         int next = Math.max(0, Math.min(2, currentLane + Integer.signum(direction)));
         if (next == currentLane) return;
 
-        int rc = tapControl(s, direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
-        if (rc == 0) {
-            currentLane = next;
-            lastMoveAt = now;
+        int rc = tapControl(direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
+        RunTrace.event("INPUT MOVE from="+currentLane+" to="+next+" rc="+rc);
+        if (rc >= 0) {
+            pendingLane=next;laneVotes=0;
+            lastMoveAt = SystemClock.uptimeMillis();
         } else if (now - lastStatusAt > 350) {
             notifyText("MOVE tap rejected rc=" + rc);
             lastStatusAt = now;
         }
     }
 
-    private int tapControl(ICoscService s, int control) throws Exception {
-        float scale = Math.max(0.5f, densityScale);
-        float cssW = displayWidth / scale;
-        float cssH = displayHeight / scale;
-        float boxW = Math.min(340f, cssW * 0.90f);
-        float gap = 10f;
-        float unit = Math.max(1f, (boxW - gap * 2f) / 4f);
-        float left = (cssW - boxW) * 0.5f;
-
-        float xCss;
-        if (control == CONTROL_LEFT) {
-            xCss = left + unit * 0.5f;
-        } else if (control == CONTROL_DRILL) {
-            xCss = left + unit + gap + unit;
-        } else {
-            xCss = left + unit + gap + unit * 2f + gap + unit * 0.5f;
-        }
-
-        float yCss = cssH - 37f;
-        int x = Math.max(0, Math.min(displayWidth - 1, Math.round(xCss * scale)));
-        int y = Math.max(0, Math.min(displayHeight - 1, Math.round(yCss * scale)));
-        return s.tap(x, y);
+    private int tapControl(int control) throws Exception {
+        GameAccessService access = GameAccessService.instance;
+        return access == null ? -3 : access.tapControl(control,analyzer.decisionAt+180);
     }
 
-    private Bitmap imageToBitmap(Image image) {
-        Image.Plane[] planes = image.getPlanes();
-        if (planes.length == 0) return null;
-        Image.Plane plane = planes[0];
-        ByteBuffer buffer = plane.getBuffer();
-        int pixelStride = plane.getPixelStride();
-        int rowStride = plane.getRowStride();
-        int rowPadding = rowStride - pixelStride * image.getWidth();
-        int paddedWidth = image.getWidth() + rowPadding / Math.max(1, pixelStride);
-        Bitmap padded = Bitmap.createBitmap(paddedWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
-        padded.copyPixelsFromBuffer(buffer);
-        if (paddedWidth == image.getWidth()) return padded;
-        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, image.getWidth(), image.getHeight());
-        padded.recycle();
-        return cropped;
+    private GameFeedback feedbackForFrame(GameAccessService access,long capturedAt){
+        GameFeedback f=access.read();
+        f.atFrame(capturedAt,SystemClock.uptimeMillis());f.lastMoveAt=lastMoveAt;f.pendingLane=pendingLane;
+        f.inputLatencyMs=timing.latencyMs();f.framePeriodMs=framePeriodMs;return f;
+    }
+
+    private static final class CapturedFrame {
+        final Bitmap bitmap;final float scale;
+        CapturedFrame(Bitmap bitmap,float scale){this.bitmap=bitmap;this.scale=scale;}
+    }
+    private CapturedFrame sampleImage(Image image,GameFeedback f){
+        Image.Plane[] planes=image.getPlanes();if(planes.length==0)return null;
+        int imageWidth=image.getWidth(),imageHeight=image.getHeight();
+        int left=0,top=0,width=imageWidth,height=imageHeight;
+        if(f.viewWidth>imageWidth*.7f&&f.viewHeight>imageHeight*.6f
+                &&f.viewLeft<imageWidth&&f.viewTop<imageHeight){
+            left=Math.max(0,f.viewLeft);top=Math.max(0,f.viewTop);
+            width=Math.min(f.viewWidth,imageWidth-left);height=Math.min(f.viewHeight,imageHeight-top);
+        }
+        int outWidth=Math.min(360,width);
+        int outHeight=Math.max(1,Math.round(height*(outWidth/(float)width)));
+        int count=outWidth*outHeight;
+        if(samplePixels==null||samplePixels.length!=count)samplePixels=new int[count];
+        Image.Plane plane=planes[0];
+        sampler.sample(plane.getBuffer(),imageWidth,imageHeight,plane.getRowStride(),plane.getPixelStride(),
+                left,top,width,height,outWidth,outHeight,samplePixels);
+        Bitmap bitmap=Bitmap.createBitmap(samplePixels,outWidth,outHeight,Bitmap.Config.ARGB_8888);
+        return new CapturedFrame(bitmap,outWidth/(float)width);
     }
 
     private void launchTargetDirect() {
@@ -414,35 +438,23 @@ public final class AutoService extends Service {
         try { startActivity(i); } catch (Throwable ignored) {}
     }
 
-    private void resetDrillState() {
-        drillActive = false;
-        drillRearmBlocked = false;
-        drillClearFrames = 0;
-        drillRearmClearFrames = 0;
-        drillStartedAt = 0;
-        lastDrillAt = 0;
-    }
-
     private void stopAutomation() {
         if (!running.getAndSet(false)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return;
         }
-        try {
-            if (drillActive && shell != null) tapControl(shell, CONTROL_DRILL);
-        } catch (Throwable ignored) {}
-        resetDrillState();
+        mainHandler.removeCallbacks(captureWatchdog);
+        RunTrace.event("STOP depth="+observedDepth);
+        RunTrace.close();
         captureStarted.set(false);
         firstFrameSeen.set(false);
         try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) {}
         try { if (virtualDisplay != null) virtualDisplay.release(); } catch (Throwable ignored) {}
         try { if (projection != null) projection.stop(); } catch (Throwable ignored) {}
-        try { Shizuku.unbindUserService(userServiceArgs, connection, true); } catch (Throwable ignored) {}
         imageReader = null;
         virtualDisplay = null;
         projection = null;
-        shell = null;
         pendingResultData = null;
         if (captureThread != null) captureThread.quitSafely();
         captureThread = null;
@@ -479,6 +491,8 @@ public final class AutoService extends Service {
         getSharedPreferences("cosc", MODE_PRIVATE)
                 .edit()
                 .putBoolean("running", running.get())
+                .putInt("observed_depth", observedDepth)
+                .putInt("confirmed_drill_frames", confirmedDrillFrames)
                 .putString("status", text)
                 .apply();
         getSystemService(NotificationManager.class)

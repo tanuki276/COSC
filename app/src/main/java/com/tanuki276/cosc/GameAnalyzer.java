@@ -2,313 +2,396 @@ package com.tanuki276.cosc;
 
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Comparator;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
-import java.util.ArrayDeque;
-import java.util.Locale;
-
+/** Palette/shape detector calibrated to the unmodified CO-DUG canvas renderer. */
 final class GameAnalyzer {
-    enum Type { NONE, LEFT, RIGHT, DRILL, TAP }
-
+    enum Type { NONE, LEFT, RIGHT, DRILL, CANCEL, TAP }
     static final class Decision {
         final Type type;
-        final float xNorm;
-        final float yNorm;
+        final float xNorm, yNorm;
         final String reason;
         final boolean urgent;
-
-        Decision(Type type, float xNorm, float yNorm, String reason, boolean urgent) {
-            this.type = type;
-            this.xNorm = xNorm;
-            this.yNorm = yNorm;
-            this.reason = reason;
-            this.urgent = urgent;
+        int rowIndex = -1;
+        int lane = -1;
+        boolean allowDuringMove;
+        Decision(Type type, String reason) { this(type, 0, 0, reason, false); }
+        Decision(Type type, float x, float y, String reason, boolean urgent) {
+            this.type = type; xNorm = x; yNorm = y; this.reason = reason; this.urgent = urgent;
         }
-
-        static Decision none(String reason) { return new Decision(Type.NONE, 0, 0, reason, false); }
-        static Decision of(Type type, String reason) { return new Decision(type, 0, 0, reason, false); }
-        static Decision urgent(Type type, String reason) { return new Decision(type, 0, 0, reason, true); }
-        static Decision tap(float x, float y, String reason) { return new Decision(Type.TAP, x, y, reason, true); }
+        static Decision none(String reason) { return new Decision(Type.NONE, reason); }
     }
+    // Include DARK FILLS. Thresholding on brightness alone misses most of each rock.
+    private static final int[] ROCK = {0x29272e,0x3f3a40,0x4c4b50,0x20232c,
+            0x382840,0x401c17,0x0f2529,0x2f1530};
+    private static final int[] ORE = {0x9ba6b2,0xd77c52,0xccd8e4,0xf4c542,
+            0xc07cff,0xff5e47,0x54f7e8,0xff62dc};
+    private static final int[] PICKUPS = {0x67e8a5,0x64d8ff,0xffb86b,0xd28cff};
+    private static final int[] POINT = {0xffd166};
+    static final class ObjectHit {
+        final float y;
+        final boolean ore;
+        int rowIndex=-1;
+        ObjectHit(float y, boolean ore) { this.y = y; this.ore = ore; }
+    }
+    private int[] pixels;
+    private int pixelWidth;
+    private int[] nearRock=ROCK,nearOre=ORE;
+    // Tracks live in camera coordinates, independent of rounded/asynchronous HUD depth.
+    private static final class VisualTrack {
+        int id,lane,seen,absent;
+        float distance;
+        long at,lastSeen;
+        boolean ore,cleared,covered;
+        float predict(long when,float velocity){return distance-velocity*Math.max(0,Math.min(2.5f,(when-at)/1000f));}
+    }
+    private final List<VisualTrack> tracks=new ArrayList<>();
+    private int sequence,previousDepth,previousWidth,runId=-1;
+    private long previousFrame,pulseAt,pausedAt;
+    private boolean resumeSnapshotUsable;
+    private float opticalVelocity, previousImageDepth=Float.NaN, frozenDepth;
+    int observedLane=-1;
+    boolean observedLaneExact, needsMenuScan;
+    String scene="";
+    GameFeedback usedFeedback;
+    long decisionAt;
+    void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;previousImageDepth=Float.NaN;resumeSnapshotUsable=false;observedLane=-1;observedLaneExact=false;pulseAt=0;pausedAt=0;}
+    void pause(GameFeedback f,long frame){
+        if(pausedAt!=0)return;
+        float v=opticalVelocity>0?opticalVelocity:f.speed()*3.25f;
+        float depthAtImage=Float.isNaN(previousImageDepth)?previousDepth:previousImageDepth;
+        float progress=Math.max(0,f.depth-depthAtImage)*3.25f;
+        resumeSnapshotUsable=previousFrame>0&&frame-previousFrame<800&&observedLane>=0
+                &&progress<=v*.8f&&frame-f.depthAt<450;
+        pausedAt=previousFrame>0?previousFrame:frame;frozenDepth=f.depth;
+        for(VisualTrack t:tracks){t.distance=t.predict(pausedAt,v)-progress;t.at=pausedAt;}
+    }
+    void accepted(Decision d) { }
+    void accepted(Decision d,long completedAt){
+        if(d.type==Type.DRILL)pulseAt=completedAt;
+        if(d.type==Type.CANCEL)pulseAt=0;
+    }
+    int visibleLane(Bitmap b,float scale){
+        int size=b.getWidth()*b.getHeight();
+        if(pixels==null||pixels.length!=size)pixels=new int[size];
+        b.getPixels(pixels,0,b.getWidth(),0,0,b.getWidth(),b.getHeight());
+        return LaneMarker.detect(pixels,b.getWidth(),b.getHeight(),scale);
+    }
+    Decision analyze(Bitmap b,int lane,float scale,long ignored){return Decision.none("HUD feedback required");}
 
-    private static final int LANES = 3;
-    private int[] previousSample;
-    private int stillFrames;
-    private int lastPreferredLane = 1;
-    private int stablePreferenceFrames;
-
-    Decision analyze(Bitmap bitmap, int currentLane, float densityScale, long sinceLastDrillMs) {
-        if (bitmap == null || bitmap.getWidth() < 120 || bitmap.getHeight() < 120) {
-            return Decision.none("bad frame");
+    Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now){
+        return analyze(b,lane,scale,f,now,()->now,()->f);
+    }
+    Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now,
+                     LongSupplier clock,Supplier<GameFeedback> hud){
+        usedFeedback=f;decisionAt=now;needsMenuScan=false;
+        if(b==null||!f.targetVisible||now-f.observedAt>1200)return Decision.none("waiting for target");
+        if(runId!=f.runId){reset();runId=f.runId;}
+        // Intro/background frames have no live HUD and must not seed tracks.
+        if(f.mode==GameFeedback.Mode.UNKNOWN||f.hp<0||f.depthAt==0){
+            reset();return Decision.none("waiting for live run HUD");
         }
-
-        float motion = frameMotion(bitmap);
-        if (motion < 3.8f) stillFrames++; else stillFrames = 0;
-        if (stillFrames >= 4) {
-            float[] yellow = findLargeYellowButton(bitmap);
-            if (yellow != null) {
-                stillFrames = 0;
-                return Decision.tap(yellow[0], yellow[1], "primary/retry");
+        long frame=f.frameAt>0?f.frameAt:now;
+        if(f.paused){needsMenuScan=true;pause(f,frame);return Decision.none("menu: tracks frozen");}
+        if(f.depth+20<previousDepth || previousWidth!=b.getWidth())reset();
+        previousDepth=f.depth;previousWidth=b.getWidth();
+        int size=b.getWidth()*b.getHeight();
+        if(pixels==null||pixels.length!=size)pixels=new int[size];
+        pixelWidth=b.getWidth();b.getPixels(pixels,0,pixelWidth,0,0,pixelWidth,b.getHeight());
+        scale=Math.max(.01f,scale);
+        observedLane=LaneMarker.detect(pixels,b.getWidth(),b.getHeight(),scale);
+        observedLaneExact=observedLane>=0;
+        if(!observedLaneExact)observedLane=detectPlayer(b,scale);
+        if(observedLane<0){
+            // A modal blurs the board while the old HUD continues to refresh.
+            // Never turn that backdrop into rocks or time out a move on it.
+            needsMenuScan=true;pause(f,frame);
+            scene="board obscured: waiting for menu/rig visibility";
+            return Decision.none(scene);
+        }
+        if(observedLane>=0&&(observedLaneExact||frame-f.lastMoveAt>260))lane=observedLane;
+        if(pausedAt>0){
+            boolean confirmedPause=f.resumeAt>=pausedAt;
+            long resumed=confirmedPause?Math.min(frame,f.resumeAt):frame;
+            long elapsed=Math.max(0,resumed-pausedAt);
+            float hiddenProgress=confirmedPause?0:Math.max(0,f.imageDepth()-frozenDepth)*3.25f;
+            for(VisualTrack t:tracks){t.at+=elapsed;t.lastSeen+=elapsed;t.distance-=hiddenProgress;}
+            if(pulseAt>0&&confirmedPause)pulseAt+=elapsed;
+            previousFrame=resumed;pausedAt=0;
+        }
+        nearRock=tintedPalette(ROCK,f);nearOre=tintedPalette(ORE,f);
+        List<ObjectHit>[] observed=detect(b,scale,lane);
+        // Pixel work can take a substantial fraction of the collision window.
+        // Read the current HUD after that work, then project to the decision time.
+        GameFeedback current=hud.get();
+        now=clock.getAsLong();usedFeedback=current;decisionAt=now;
+        if(current.runId!=f.runId || !current.targetVisible || current.gameOver)
+            return Decision.none("target/run changed during vision");
+        f=current;
+        if(f.paused){needsMenuScan=true;pause(f,frame);return Decision.none("menu during vision");}
+        if(f.mode==GameFeedback.Mode.UNKNOWN||f.hp<0)
+            return Decision.none("waiting for refreshed HUD");
+        float body=b.getHeight()*.32f,tip=67+f.tipReach;
+        float fallback=f.speed()*3.25f;
+        float velocity=opticalVelocity>0?opticalVelocity:fallback;
+        List<Float> rates=new ArrayList<>();
+        java.util.HashSet<Integer> matched=new java.util.HashSet<>();
+        for(int l=0;l<3;l++)for(ObjectHit hit:observed[l]){
+            float d=(hit.y-body)/scale;
+            VisualTrack best=null;float error=34;
+            for(VisualTrack t:tracks)if(t.lane==l&&!t.cleared&&!matched.contains(t.id)){
+                float e=Math.abs(t.predict(frame,velocity)-d);
+                if(e<error){best=t;error=e;}
             }
-            if (stillFrames >= 7) {
-                stillFrames = 0;
-                return Decision.tap(0.36f, bitmap.getWidth() > bitmap.getHeight() ? 0.56f : 0.52f, "upgrade choice");
-            }
-        }
-
-        LaneState[] lanes = scanLanes(bitmap, densityScale);
-        LaneState here = lanes[currentLane];
-
-        // Highest priority: an object is entering the drill-tip window now. Start the drill
-        // before body contact. Do not side-step away from ore once it is committed to our lane.
-        if (here.tipOre > 0.008f && sinceLastDrillMs > 105) {
-            return Decision.urgent(Type.DRILL, "ORE LOCK tip=" + fmt(here.tipOre));
-        }
-        if (here.tipHazard > 0.010f && sinceLastDrillMs > 105) {
-            return Decision.urgent(Type.DRILL, "EARLY DRILL tip=" + fmt(here.tipHazard));
-        }
-
-        // If ore is already close in the current lane, stay on it. This prevents the old failure
-        // where the controller moved sideways just before the ore reached the drill.
-        if (here.nearOre > 0.010f) {
-            if (sinceLastDrillMs > 125) return Decision.urgent(Type.DRILL, "ORE LOCK near=" + fmt(here.nearOre));
-            return Decision.none("ore locked L" + (currentLane + 1));
-        }
-
-        int best = chooseBestLane(lanes, currentLane);
-        if (best == lastPreferredLane) stablePreferenceFrames++;
-        else {
-            lastPreferredLane = best;
-            stablePreferenceFrames = 1;
-        }
-
-        // A true imminent rock is drilled first. Dodging at the last instant is more likely to
-        // cause a side collision than a short drill pulse.
-        if (here.nearHazard > 0.032f && sinceLastDrillMs > 120) {
-            return Decision.urgent(Type.DRILL, "impact drill=" + fmt(here.nearHazard));
-        }
-
-        // Only route away while the threat is still far enough out. Require consistency over
-        // multiple frames so particles and camera shake cannot cause left/right oscillation.
-        if (best != currentLane && stablePreferenceFrames >= 2) {
-            float improvement = lanes[currentLane].cost - lanes[best].cost;
-            if (improvement > 0.030f && here.tipHazard < 0.006f && here.tipOre < 0.004f) {
-                return Decision.of(best < currentLane ? Type.LEFT : Type.RIGHT,
-                        "route " + (currentLane + 1) + "->" + (best + 1) + " d=" + fmt(improvement));
-            }
-        }
-
-        int blocked = 0;
-        for (LaneState l : lanes) if (l.tipHazard + l.tipOre > 0.010f || l.nearHazard + l.nearOre > 0.030f) blocked++;
-        if (blocked == LANES && sinceLastDrillMs > 105) {
-            return Decision.urgent(Type.DRILL, "barrier");
-        }
-
-        if (best != currentLane && stablePreferenceFrames >= 3 &&
-                lanes[best].reward > lanes[currentLane].reward + 0.025f &&
-                lanes[best].cost <= lanes[currentLane].cost + 0.006f) {
-            return Decision.of(best < currentLane ? Type.LEFT : Type.RIGHT, "reward L" + (best + 1));
-        }
-
-        return Decision.none("L" + (currentLane + 1) + " " + laneSummary(lanes));
-    }
-
-    private int chooseBestLane(LaneState[] lanes, int currentLane) {
-        int best = currentLane;
-        float bestScore = objective(lanes[currentLane], currentLane, currentLane);
-        for (int i = 0; i < LANES; i++) {
-            float score = objective(lanes[i], currentLane, i);
-            if (score < bestScore) {
-                bestScore = score;
-                best = i;
-            }
-        }
-        return best;
-    }
-
-    private float objective(LaneState s, int currentLane, int candidate) {
-        float movePenalty = Math.abs(candidate - currentLane) * 0.020f;
-        return s.cost + movePenalty - Math.min(0.040f, s.reward * 0.30f);
-    }
-
-    private LaneState[] scanLanes(Bitmap b, float densityScale) {
-        int w = b.getWidth(), h = b.getHeight();
-        densityScale = Math.max(0.5f, densityScale);
-        float cssScreenW = w / densityScale;
-        float cssFieldW = Math.min(cssScreenW * 0.88f, 480f);
-        float fieldW = Math.min(w * 0.92f, cssFieldW * densityScale);
-        float left = (w - fieldW) * 0.5f;
-        float laneW = fieldW / 3f;
-        float playerY = h * 0.32f;
-
-        // CO-DUG drill tip starts ~67 CSS px below the player. Watch a narrow band just below
-        // that tip so the command is issued before the object enters the actual destroy window.
-        int tipY0 = Math.round(playerY + 74f * densityScale);
-        int tipY1 = Math.round(playerY + 128f * densityScale);
-        int nearY0 = Math.round(playerY + 34f * densityScale);
-        int nearY1 = Math.round(playerY + 172f * densityScale);
-        int farY0 = Math.round(playerY + 172f * densityScale);
-        int farY1 = Math.min(h, Math.round(playerY + 330f * densityScale));
-
-        LaneState[] out = {new LaneState(), new LaneState(), new LaneState()};
-        for (int lane = 0; lane < LANES; lane++) {
-            int x0 = Math.round(left + laneW * lane + laneW * 0.18f);
-            int x1 = Math.round(left + laneW * (lane + 1) - laneW * 0.18f);
-            sampleBand(b, out[lane], x0, x1, tipY0, tipY1, Band.TIP);
-            sampleBand(b, out[lane], x0, x1, nearY0, nearY1, Band.NEAR);
-            sampleBand(b, out[lane], x0, x1, farY0, farY1, Band.FAR);
-            out[lane].finish();
-        }
-        return out;
-    }
-
-    private void sampleBand(Bitmap b, LaneState s, int x0, int x1, int y0, int y1, Band band) {
-        int w = b.getWidth(), h = b.getHeight();
-        x0 = clamp(x0, 0, w - 1); x1 = clamp(x1, x0 + 1, w);
-        y0 = clamp(y0, 0, h - 1); y1 = clamp(y1, y0 + 1, h);
-        int step = band == Band.TIP ? 2 : 3;
-        for (int y = y0; y < y1; y += step) {
-            for (int x = x0; x < x1; x += step) {
-                int c = b.getPixel(x, y);
-                PixelKind k = classify(Color.red(c), Color.green(c), Color.blue(c));
-                s.add(band, k);
-            }
-        }
-    }
-
-    private PixelKind classify(int r, int g, int b) {
-        int max = Math.max(r, Math.max(g, b));
-        int min = Math.min(r, Math.min(g, b));
-        int sat = max - min;
-        int sum = r + g + b;
-        if (max < 58 || sum < 135) return PixelKind.BG;
-
-        if (r > 190 && g > 150 && b < 125 && r - b > 70) return PixelKind.POINT;
-        if (g > 145 && g > r + 18 && g > b + 5) return PixelKind.SUPPLY;
-        if (b > 155 && g > 118 && b >= r + 14) return PixelKind.SUPPLY;
-        if (r > 190 && g > 98 && g < 190 && b < 138) return PixelKind.SUPPLY;
-
-        // Bright ore cores/colors. The thresholds intentionally overlap several ore palettes
-        // used at deeper layers while rejecting the darker rock fills.
-        if (sum > 500 || (max > 184 && sat > 58) ||
-                (r > 170 && b > 155 && sat > 42) ||
-                (g > 185 && b > 175 && r < 155)) return PixelKind.ORE;
-
-        if (max > 74 && (sat > 15 || sum > 275)) return PixelKind.HAZARD;
-        return PixelKind.BG;
-    }
-
-    private float frameMotion(Bitmap b) {
-        final int cols = 18, rows = 12;
-        int[] sample = new int[cols * rows];
-        int index = 0;
-        for (int gy = 0; gy < rows; gy++) {
-            int y = clamp((gy * b.getHeight() + b.getHeight() / 2) / rows, 0, b.getHeight() - 1);
-            for (int gx = 0; gx < cols; gx++) {
-                int x = clamp((gx * b.getWidth() + b.getWidth() / 2) / cols, 0, b.getWidth() - 1);
-                int c = b.getPixel(x, y);
-                sample[index++] = (Color.red(c) * 3 + Color.green(c) * 6 + Color.blue(c)) / 10;
-            }
-        }
-        if (previousSample == null) {
-            previousSample = sample;
-            return 99;
-        }
-        long diff = 0;
-        for (int i = 0; i < sample.length; i++) diff += Math.abs(sample[i] - previousSample[i]);
-        previousSample = sample;
-        return diff / (float) sample.length;
-    }
-
-    private float[] findLargeYellowButton(Bitmap b) {
-        int w = b.getWidth(), h = b.getHeight();
-        boolean[] yellow = new boolean[w * h];
-        for (int y = Math.round(h * 0.16f); y < h; y += 2) {
-            for (int x = 0; x < w; x += 2) {
-                int c = b.getPixel(x, y);
-                int r = Color.red(c), g = Color.green(c), bl = Color.blue(c);
-                if (r > 185 && g > 135 && g < 245 && bl < 165 && r - bl > 55) yellow[y * w + x] = true;
-            }
-        }
-        boolean[] seen = new boolean[yellow.length];
-        int bestCount = 0, bestMinX = 0, bestMaxX = 0, bestMinY = 0, bestMaxY = 0;
-        int[] dx = {2, -2, 0, 0}, dy = {0, 0, 2, -2};
-        ArrayDeque<Integer> q = new ArrayDeque<>();
-        for (int y = 0; y < h; y += 2) {
-            for (int x = 0; x < w; x += 2) {
-                int start = y * w + x;
-                if (!yellow[start] || seen[start]) continue;
-                seen[start] = true;
-                q.add(start);
-                int count = 0, minX = x, maxX = x, minY = y, maxY = y;
-                while (!q.isEmpty()) {
-                    int p = q.removeFirst();
-                    int px = p % w, py = p / w;
-                    count++;
-                    minX = Math.min(minX, px); maxX = Math.max(maxX, px);
-                    minY = Math.min(minY, py); maxY = Math.max(maxY, py);
-                    for (int i = 0; i < 4; i++) {
-                        int nx = px + dx[i], ny = py + dy[i];
-                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                        int np = ny * w + nx;
-                        if (yellow[np] && !seen[np]) { seen[np] = true; q.add(np); }
-                    }
+            if(best==null){
+                // Don't create tracks from the player's drill/particles.
+                if(d<45&&l==lane)continue;
+                best=new VisualTrack();best.id=++sequence;best.lane=l;best.distance=d;best.at=frame;tracks.add(best);
+            }else{
+                float dt=(frame-best.at)/1000f;
+                if(dt>=.025f&&dt<=.4f&&d>135&&best.distance>d){
+                    float v=(best.distance-d)/dt;
+                    if(v>fallback*.45f&&v<fallback*2.4f)rates.add(v);
                 }
-                if (count > bestCount) {
-                    bestCount = count; bestMinX = minX; bestMaxX = maxX; bestMinY = minY; bestMaxY = maxY;
+            }
+            matched.add(best.id);best.seen++;best.absent=0;best.lastSeen=frame;best.ore=hit.ore;
+            // Near the player a clipped silhouette is not a reliable centre.
+            if(d>tip+35||l!=lane||best.seen==1){best.distance=d;best.at=frame;}
+        }
+        if(!rates.isEmpty()){
+            rates.sort(Float::compare);float measured=rates.get(rates.size()/2);
+            opticalVelocity=opticalVelocity>0?opticalVelocity*.8f+measured*.2f:measured;
+            velocity=opticalVelocity;
+        }
+        now=clock.getAsLong();decisionAt=now;
+        final float v=velocity;
+        tracks.removeIf(t->t.predict(frame,v)<-45||frame-t.lastSeen>2500);
+        @SuppressWarnings("unchecked")
+        List<ObjectHit>[] objects=new List[]{new ArrayList<>(),new ArrayList<>(),new ArrayList<>()};
+        for(VisualTrack t:tracks){
+            float imageD=t.predict(frame,velocity);
+            if(!matched.contains(t.id))t.absent++;
+            // Remember evidence that this pulse covered this specific row.
+            // ACTIVE observed only after a late rock has passed the tip is not
+            // evidence of destruction. Retain that rock as a collision threat.
+            if(t.lane==lane&&f.mode==GameFeedback.Mode.ACTIVE&&now-f.modeAt<450
+                    &&pulseAt>0&&frame>=pulseAt+16&&frame-pulseAt<1000
+                    &&imageD>=tip-24&&imageD<=tip+15)t.covered=true;
+            if(t.covered&&t.absent>=2&&imageD<tip-26)t.cleared=true;
+            if(t.cleared)continue;
+            float d=t.predict(now,velocity);
+            ObjectHit h=new ObjectHit(body+d*scale,t.ore);h.rowIndex=t.id;objects[t.lane].add(h);
+        }
+        previousFrame=frame;previousImageDepth=f.imageDepth();
+        for(List<ObjectHit> list:objects)list.sort(Comparator.comparingDouble(t->t.y));
+        ObjectHit here=next(objects[lane],body-10*scale);
+        float distance=here==null?Float.POSITIVE_INFINITY:(here.y-body)/scale;
+        StringBuilder lanes=new StringBuilder();
+        for(int l=0;l<3;l++){
+            lanes.append(" L").append(l).append('[');
+            for(int i=0;i<Math.min(4,objects[l].size());i++)lanes.append(Math.round((objects[l].get(i).y-body)/scale)).append(',');
+            lanes.append(']');
+        }
+        scene="v="+Math.round(velocity)+" tracks="+tracks.size()+" lane="+lane+" next="+(Float.isFinite(distance)?Math.round(distance):"clear")+" tip="+tip+lanes;
+        boolean fresh=f.modeAt>0&&now-f.modeAt<450;
+        float latency=Math.max(.04f,Math.min(.4f,f.inputLatencyMs/1000f));
+        // Use one bounded pulse. Never add a whole slow capture interval to
+        // its lead: the game's base pulse lasts only 0.5 seconds.
+        float lead=velocity*Math.min(.30f,latency+Math.min(.10f,f.framePeriodMs/2000f)+.03f);
+        float arrival=distance-velocity*latency;
+        // A command that would arrive below the destroy window has already
+        // missed, even if the rock is still above that boundary right now.
+        boolean missed=arrival<tip-24;
+        if(fresh&&f.mode==GameFeedback.Mode.ACTIVE){
+            if(f.heat+80*((now-f.modeAt)/1000f+latency)>=88){
+                Decision guard=new Decision(Type.CANCEL,"heat guard: "+scene);guard.allowDuringMove=true;return guard;
+            }
+            VisualTrack nearest=null;
+            if(here!=null)for(VisualTrack t:tracks)if(t.id==here.rowIndex){nearest=t;break;}
+            // An already-running drill does not incur a new activation latency.
+            // Escape only if the captured rock has passed the actual window
+            // without destruction evidence, or is still visibly present below it.
+            boolean seenBehind=nearest!=null&&nearest.predict(frame,velocity)<tip-26
+                    &&(!nearest.covered||matched.contains(nearest.id));
+            missed=seenBehind;
+            if(!missed){
+                if(distance>tip+velocity*.45f)return new Decision(Type.CANCEL,"clear ahead: "+scene);
+                return Decision.none("active pulse retained image="+(nearest==null?"clear":Math.round(nearest.predict(frame,velocity)))+": "+scene);
+            }
+        }
+        boolean ready=fresh&&f.mode==GameFeedback.Mode.READY&&f.heat>=0&&f.heat<48;
+        if(f.pendingLane>=0&&ready){
+            // The drill follows the logical lane immediately, even while the rig
+            // is still sliding. Cover either possible lane during that interval.
+            for(int l:new int[]{lane,f.pendingLane}){
+                ObjectHit target=next(objects[l],body-10*scale);
+                if(target==null)continue;
+                float gap=(target.y-body)/scale;
+                if(gap<=tip+12+lead&&gap-velocity*latency>=tip-24){
+                    Decision d=new Decision(Type.DRILL,"cover lane transition: "+scene);
+                    d.rowIndex=target.rowIndex;d.lane=l;d.allowDuringMove=true;return d;
                 }
             }
         }
-        if (bestCount > 58 && bestMaxX - bestMinX > w * 0.10f && bestMaxY - bestMinY > 7) {
-            return new float[]{((bestMinX + bestMaxX) * 0.5f) / w, ((bestMinY + bestMaxY) * 0.5f) / h};
+        // A confirmed usable drill is the first choice. Do not leave a
+        // breakable row merely because a hypothetical path has fewer rocks.
+        if(ready&&!missed){
+            if(distance<=tip+12+lead){
+                Decision d=new Decision(Type.DRILL,"intercept: "+scene);d.rowIndex=here.rowIndex;d.lane=lane;return d;
+            }
+            return Decision.none("hold lane for drill: "+scene);
         }
+        float timeToWindow=(distance-tip-15)/velocity;
+        if(fresh&&f.mode==GameFeedback.Mode.COOLING&&f.heat<48
+                &&timeToWindow>f.cooldownSeconds+latency+.12f)
+            return Decision.none("recover before target: "+scene);
+        float cadence=Math.min(.25f,f.framePeriodMs/1000f);
+        float timeToBody=(distance-22)/velocity;
+        // Preserve the committed route through small frame-to-frame changes.
+        // An imminent collision can override this hold immediately.
+        if(f.lastMoveAt>0&&now-f.lastMoveAt<450&&!missed&&timeToBody>latency+cadence+.18f)
+            return Decision.none("hold committed route: "+scene);
+        float lookahead=Math.max(.7f,latency+cadence+.30f);
+        if(distance<tip+velocity*lookahead){
+            int destination=LaneSafety.choose(distances(objects,body,scale),lane,velocity,latency+.06f,f.framePeriodMs/1000f);
+            if(destination!=lane){
+                Decision d=new Decision(destination<lane?Type.LEFT:Type.RIGHT,0,0,"planned escape: "+scene,missed);
+                d.lane=lane;return d;
+            }
+        }
+        return Decision.none(scene+" HUD="+f.mode+" fresh="+fresh);
+    }
+
+    private float[][] distances(List<ObjectHit>[] hits,float body,float scale){
+        float[][] result=new float[3][];
+        for(int l=0;l<3;l++){
+            result[l]=new float[hits[l].size()];
+            for(int i=0;i<result[l].length;i++)result[l][i]=(hits[l].get(i).y-body)/scale;
+        }
+        return result;
+    }
+    Decision afterMenuResume(int lane,GameFeedback f,long now){
+        if(pausedAt==0||!resumeSnapshotUsable||f.runId!=runId||f.paused||f.gameOver
+                ||f.resumeAt==0||now-f.resumeAt>180||lane!=observedLane)return Decision.none("resume awaiting image");
+        float v=opticalVelocity>0?opticalVelocity:f.speed()*3.25f;
+        float delay=Math.max(.10f,f.inputLatencyMs/1000f)+.06f;
+        float[][] rocks=new float[3][];
+        float nearest=Float.POSITIVE_INFINITY;
+        for(int l=0;l<3;l++){
+            ArrayList<Float> values=new ArrayList<>();
+            for(VisualTrack t:tracks)if(!t.cleared&&t.lane==l){
+                float d=t.distance-v*Math.max(0,(now-f.resumeAt)/1000f);
+                values.add(d);if(l==lane&&d>=-22)nearest=Math.min(nearest,d);
+            }
+            rocks[l]=new float[values.size()];for(int i=0;i<values.size();i++)rocks[l][i]=values.get(i);
+        }
+        if(nearest>67+f.tipReach+v*.65f)return Decision.none("resume clear");
+        int next=LaneSafety.choose(rocks,lane,v,delay,f.framePeriodMs/1000f);
+        if(next==lane)return Decision.none("resume needs fresh image");
+        decisionAt=now;
+        Decision d=new Decision(next<lane?Type.LEFT:Type.RIGHT,0,0,"resume snapshot escape",true);d.lane=lane;return d;
+    }
+    private ObjectHit next(List<ObjectHit> hits, float minY) {
+        for (ObjectHit hit : hits) if (hit.y > minY) return hit;
         return null;
     }
 
-    private String laneSummary(LaneState[] lanes) {
-        return fmt(lanes[0].cost) + "/" + fmt(lanes[1].cost) + "/" + fmt(lanes[2].cost);
-    }
-
-    private static final class LaneState {
-        int tipHazardCount, tipOreCount, tipTotal;
-        int nearHazardCount, nearOreCount, nearSupplyCount, nearPointCount, nearTotal;
-        int farHazardCount, farOreCount, farSupplyCount, farPointCount, farTotal;
-        float tipHazard, tipOre, nearHazard, nearOre, reward, cost;
-
-        void add(Band band, PixelKind kind) {
-            if (band == Band.TIP) {
-                tipTotal++;
-                if (kind == PixelKind.HAZARD) tipHazardCount++;
-                else if (kind == PixelKind.ORE) tipOreCount++;
-                return;
-            }
-            if (band == Band.NEAR) nearTotal++; else farTotal++;
-            switch (kind) {
-                case HAZARD -> { if (band == Band.NEAR) nearHazardCount++; else farHazardCount++; }
-                case ORE -> { if (band == Band.NEAR) nearOreCount++; else farOreCount++; }
-                case SUPPLY -> { if (band == Band.NEAR) nearSupplyCount++; else farSupplyCount++; }
-                case POINT -> { if (band == Band.NEAR) nearPointCount++; else farPointCount++; }
-                default -> { }
+    @SuppressWarnings("unchecked")
+    List<ObjectHit>[] detect(Bitmap b, float scale, int currentLane) {
+        int w = b.getWidth(), h = b.getHeight();
+        float fieldW = Math.min(w * .88f, 480 * scale);
+        float left = (w - fieldW) / 2, laneW = fieldW / 3;
+        int scanStart = Math.max(0, Math.round(h * .32f - 30 * scale));
+        int end = Math.min(Math.round(h * .78f), Math.round(h * .32f + 390 * scale));
+        List<ObjectHit>[] out = new List[]{new ArrayList<>(),new ArrayList<>(),new ArrayList<>()};
+        for (int lane = 0; lane < 3; lane++) {
+            int x0 = Math.max(0, Math.round(left + laneW * (lane + .22f)));
+            int x1 = Math.min(w, Math.round(left + laneW * (lane + .78f)));
+            int referenceLeft=Math.max(0,Math.round(left+laneW*(lane+.10f)));
+            int referenceRight=Math.min(w-1,Math.round(left+laneW*(lane+.90f)));
+            int start = Math.max(0, lane == currentLane ? Math.round(h * .32f + 32 * scale) : scanStart);
+            int first = -1, last = -1, rock = 0, ore = 0;
+            for (int y = start; y <= end; y++) {
+                int r = 0, o = 0;
+                if (y < end) for (int x = x0; x < x1; x += 2) {
+                    // Exclude the drill itself, but retain the rock's side
+                    // silhouette close to the tip immediately after a menu.
+                    if(lane==currentLane&&y<h*.32f+80*scale
+                            &&Math.abs(x-(left+laneW*(lane+.5f)))<22*scale)continue;
+                    int c = pixels[y * pixelWidth + x];
+                    if(!HazardContrast.distinct(c,pixels[y*pixelWidth+referenceLeft],pixels[y*pixelWidth+referenceRight]))continue;
+                    boolean near=lane==currentLane&&y<h*.32f+115*scale;
+                    if (matches(c, ROCK, 16)||(near&&matches(c,nearRock,12))) r++;
+                    else if (matches(c, ORE, 8)||(near&&matches(c,nearOre,8))) o++;
+                }
+                if (r + o >= Math.max(2, (x1 - x0) / 12)) {
+                    if (first < 0) first = y;
+                    last = y; rock += r; ore += o;
+                }
+                if (first >= 0 && (y - last > Math.max(2, 4 * scale) || y == end)) {
+                    if (last - first >= Math.max(5, 22 * scale)) {
+                        int pickupPixels = 0;
+                        int middle = (first + last) / 2;
+                        for (int yy = Math.max(first, Math.round(middle - 10 * scale));
+                             yy <= Math.min(last, middle + 10 * scale); yy++)
+                            for (int xx = x0; xx < x1; xx++)
+                                if (matches(pixels[yy * pixelWidth + xx], PICKUPS, 8)
+                                        || matches(pixels[yy * pixelWidth + xx], POINT, 2)) pickupPixels++;
+                        if (pickupPixels < Math.max(4, 8 * scale * scale))
+                            out[lane].add(new ObjectHit((first + last) * .5f, ore > rock));
+                    }
+                    first = -1; rock = 0; ore = 0;
+                }
             }
         }
-
-        void finish() {
-            tipHazard = ratio(tipHazardCount, tipTotal);
-            tipOre = ratio(tipOreCount, tipTotal);
-            nearHazard = ratio(nearHazardCount, nearTotal);
-            nearOre = ratio(nearOreCount, nearTotal);
-            float farHazard = ratio(farHazardCount, farTotal);
-            float supply = ratio(nearSupplyCount, nearTotal) + ratio(farSupplyCount, farTotal) * 0.7f;
-            float points = ratio(nearPointCount, nearTotal) + ratio(farPointCount, farTotal) * 0.5f;
-            reward = supply * 1.8f + points * 0.45f + nearOre * 0.40f;
-            cost = tipHazard * 5.2f + nearHazard * 2.7f + farHazard * 1.05f + tipOre * 0.18f + nearOre * 0.22f;
-        }
-
-        private static float ratio(int n, int d) { return d == 0 ? 0f : n / (float) d; }
+        return out;
     }
-
-    private enum Band { TIP, NEAR, FAR }
-    private enum PixelKind { BG, HAZARD, ORE, SUPPLY, POINT }
-
-    private static String fmt(float v) { return String.format(Locale.US, "%.3f", v); }
-    private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
+    // The selected-cell fill and active glow are drawn on top of the rocks.
+    // Match those renderer colours as well as the unobscured fill palette.
+    static int blend(int base,int overlay,float alpha){
+        int r=Math.round(((base>>16)&255)*(1-alpha)+((overlay>>16)&255)*alpha);
+        int g=Math.round(((base>>8)&255)*(1-alpha)+((overlay>>8)&255)*alpha);
+        int b=Math.round((base&255)*(1-alpha)+(overlay&255)*alpha);
+        return (r<<16)|(g<<8)|b;
+    }
+    private int[] tintedPalette(int[] base,GameFeedback f){
+        boolean active=f.mode==GameFeedback.Mode.ACTIVE;
+        int stage=f.heat<22?0:f.heat<48?1:f.heat<72?2:3;
+        int glow=new int[]{0x67e8a5,0xffd166,0xff9f43,0xff596d}[stage];
+        float opacity=stage<2?.12f:stage==2?.14f:.18f;
+        int[] result=new int[base.length*(active?3:1)];
+        for(int i=0;i<base.length;i++){
+            int cell=blend(base[i],active?0xffd166:0xffffff,active?.15f:.055f);
+            result[i]=cell;
+            if(active){result[i+base.length]=blend(base[i],glow,opacity);result[i+base.length*2]=blend(cell,glow,opacity);}
+        }
+        return result;
+    }
+    private boolean matches(int c, int[] palette, int tolerance) {
+        for (int p : palette)
+            if (Math.abs(Color.red(c) - ((p >> 16) & 255)) <= tolerance
+                    && Math.abs(Color.green(c) - ((p >> 8) & 255)) <= tolerance
+                    && Math.abs(Color.blue(c) - (p & 255)) <= tolerance) return true;
+        return false;
+    }
+    private int detectPlayer(Bitmap b, float s) {
+        float fw = Math.min(b.getWidth() * .88f, 480 * s), left = (b.getWidth() - fw) / 2;
+        int best = -1, count = 0;
+        for (int lane = 0; lane < 3; lane++) {
+            float cx = left + fw * (lane + .5f) / 3;
+            int n = 0;
+            for (int y = Math.max(0, Math.round(b.getHeight() * .32f - 26 * s)); y < Math.min(b.getHeight(), b.getHeight() * .32f + 10 * s); y++)
+                for (int x = Math.max(0, Math.round(cx - 39 * s)); x < Math.min(b.getWidth(), cx + 39 * s); x++) {
+                    int c = pixels[y * pixelWidth + x];
+                    if (Math.abs(Color.red(c) - 80) < 4 && Math.abs(Color.green(c) - 100) < 4
+                            && Math.abs(Color.blue(c) - 119) < 4) n++;
+                }
+            if (n > count) { count = n; best = lane; }
+        }
+        return count >= 10 * s * s ? best : -1;
+    }
 }

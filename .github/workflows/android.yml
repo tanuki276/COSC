@@ -18,6 +18,20 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Check RGBA pixel layouts (no Android runtime)
+        run: |
+          javac -d /tmp/cosc-pixel-check app/src/main/java/com/tanuki276/cosc/RgbaSampler.java tools/checks/RgbaSamplerCheck.java
+          java -cp /tmp/cosc-pixel-check com.tanuki276.cosc.RgbaSamplerCheck
+      - name: Check lane occupancy arithmetic (no game runtime)
+        run: |
+          javac -d /tmp/cosc-lane-check app/src/main/java/com/tanuki276/cosc/LaneSafety.java tools/checks/LaneSafetyCheck.java
+          java -cp /tmp/cosc-lane-check com.tanuki276.cosc.LaneSafetyCheck
+      - name: Check lane markers and command state (no game runtime)
+        run: |
+          javac -d /tmp/cosc-control-check tools/replay/stubs/android/graphics/Bitmap.java tools/replay/stubs/android/graphics/Color.java app/src/main/java/com/tanuki276/cosc/GameAnalyzer.java app/src/main/java/com/tanuki276/cosc/GameFeedback.java app/src/main/java/com/tanuki276/cosc/ControlTiming.java app/src/main/java/com/tanuki276/cosc/LaneSafety.java app/src/main/java/com/tanuki276/cosc/LaneMarker.java app/src/main/java/com/tanuki276/cosc/HazardContrast.java tools/checks/LaneMarkerCheck.java tools/checks/ControlStateCheck.java tools/checks/VisionRegressionCheck.java
+          java -cp /tmp/cosc-control-check com.tanuki276.cosc.LaneMarkerCheck
+          java -cp /tmp/cosc-control-check com.tanuki276.cosc.ControlStateCheck
+          java -cp /tmp/cosc-control-check com.tanuki276.cosc.VisionRegressionCheck
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
       - name: Upload APK
