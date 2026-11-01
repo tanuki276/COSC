@@ -319,7 +319,7 @@ public final class AutoService extends Service {
                 long requestedAt=SystemClock.uptimeMillis();
                 int rc = tapControl(CONTROL_DRILL);
                 RunTrace.event("INPUT "+d.type+" rc="+rc+" elapsed="+(SystemClock.uptimeMillis()-requestedAt));
-                if(rc==0){lastDrillAt=SystemClock.uptimeMillis();timing.accepted(d.type,requestedAt);analyzer.accepted(d);}
+                if(rc>=0){lastDrillAt=SystemClock.uptimeMillis();timing.accepted(d.type,requestedAt);analyzer.accepted(d);}
             }
             case LEFT -> move(-1, d.urgent, now);
             case RIGHT -> move(1, d.urgent, now);
@@ -335,7 +335,7 @@ public final class AutoService extends Service {
 
         int rc = tapControl(direction < 0 ? CONTROL_LEFT : CONTROL_RIGHT);
         RunTrace.event("INPUT MOVE from="+currentLane+" to="+next+" rc="+rc);
-        if (rc == 0) {
+        if (rc >= 0) {
             currentLane = next;pendingLane=next;laneVotes=0;
             lastMoveAt = SystemClock.uptimeMillis();
         } else if (now - lastStatusAt > 350) {

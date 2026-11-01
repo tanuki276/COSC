@@ -38,6 +38,10 @@ editing, APK patching, or injection into CO-DUG is used.
   in the FCNT M06 device trace. Menu dispatch and observed confirmation are logged
   separately. HUD state from a previous run is invalidated on start.
 - Allows escape movement while a drill acknowledgement is pending.
+- Expires touch requests that miss their dispatch deadline. A dispatched touch
+  whose completion callback times out remains pending until game feedback,
+  preventing an immediate duplicate toggle. UNKNOWN HUD state never acknowledges
+  cancellation.
 - Requires live HUD mode for toggles and calibrated actual button spacing for vision.
 - Requests pause and stops if capture stalls during play.
 - Restricts clicks, gestures and HUD reads to CO-DUG's foreground package.
@@ -46,7 +50,7 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.6.0 is a control and diagnostic revision. Physical-device survival to
+Version 0.7.0 is a control and diagnostic revision. Physical-device survival to
 100000 m has not been verified. This revision is compiled only; the replay and
 emulator workflows are manual and have not been run for this revision.
 

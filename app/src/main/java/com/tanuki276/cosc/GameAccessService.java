@@ -229,7 +229,7 @@ public final class GameAccessService extends AccessibilityService {
             Rect box=new Rect();action.getBoundsInScreen(box);if(box.isEmpty())return false;
             int rc=tap(box.centerX(),box.centerY());
             RunTrace.event("MENU_TOUCH label="+chosen+" bounds="+box+" rc="+rc);
-            if(rc!=0)return false;
+            if(rc<0)return false;
             synchronized(lock){pendingMenu=chosen;pendingMenuAt=SystemClock.uptimeMillis();pendingMenuPaused=wasPaused;}
             // Acceleration is a live HUD button. Touching it must not erase
             // obstacle tracks, lane acknowledgement, or drill acknowledgement.
@@ -275,18 +275,36 @@ public final class GameAccessService extends AccessibilityService {
         RunTrace.event("CONTROL_TOUCH index="+control+" bounds="+box);
         return box.isEmpty()?-4:tap(box.centerX(),box.centerY());
     }
+    // 0 = gesture completed; 1 = dispatched, completion still unknown.
+    // A timeout before dispatch expires the queued request permanently.
     int tap(int x,int y)throws InterruptedException{
-        CountDownLatch done=new CountDownLatch(1);boolean[] ok={false};
-        main.post(()->{
-            AccessibilityNodeInfo r=root(false);if(r==null){done.countDown();return;}
-            boolean target=TARGET.equals(String.valueOf(r.getPackageName()));r.recycle();if(!target){done.countDown();return;}
-            Path p=new Path();p.moveTo(x,y);
-            boolean dispatched=dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p,0,40)).build(),new GestureResultCallback(){
-                @Override public void onCompleted(GestureDescription g){ok[0]=true;done.countDown();}
-                @Override public void onCancelled(GestureDescription g){done.countDown();}
-            },main);
-            if(!dispatched)done.countDown();
-        });
-        return done.await(500,TimeUnit.MILLISECONDS)&&ok[0]?0:-3;
+        CountDownLatch done=new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger state=new java.util.concurrent.atomic.AtomicInteger(0);
+        long deadline=SystemClock.uptimeMillis()+500;
+        Runnable request=()->{
+            if(state.get()!=0||SystemClock.uptimeMillis()>=deadline){done.countDown();return;}
+            AccessibilityNodeInfo r=root(false);
+            boolean target=r!=null&&TARGET.equals(String.valueOf(r.getPackageName()));
+            if(r!=null)r.recycle();
+            if(!target){state.compareAndSet(0,3);done.countDown();return;}
+            // The root query may itself outlive the caller's deadline.
+            if(SystemClock.uptimeMillis()>=deadline||!state.compareAndSet(0,1)){done.countDown();return;}
+            try{
+                Path p=new Path();p.moveTo(x,y);
+                boolean dispatched=dispatchGesture(new GestureDescription.Builder()
+                        .addStroke(new GestureDescription.StrokeDescription(p,0,40)).build(),new GestureResultCallback(){
+                    @Override public void onCompleted(GestureDescription g){state.set(2);done.countDown();}
+                    @Override public void onCancelled(GestureDescription g){state.set(3);done.countDown();}
+                },main);
+                if(!dispatched){state.set(3);done.countDown();}
+            }catch(RuntimeException failure){state.set(3);done.countDown();RunTrace.event("TOUCH_ERROR "+failure);}
+        };
+        main.post(request);
+        try{done.await(500,TimeUnit.MILLISECONDS);}
+        catch(InterruptedException interrupted){Thread.currentThread().interrupt();}
+        state.compareAndSet(0,4);main.removeCallbacks(request);
+        int result=state.get();
+        if(result==1)RunTrace.event("TOUCH_COMPLETION_UNKNOWN x="+x+" y="+y);
+        return result==2?0:result==1?1:-3;
     }
 }

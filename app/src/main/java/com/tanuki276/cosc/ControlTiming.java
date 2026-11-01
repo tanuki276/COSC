@@ -10,9 +10,10 @@ final class ControlTiming {
     boolean allow(GameAnalyzer.Type type, GameFeedback f, long now) {
         if(type==GameAnalyzer.Type.LEFT||type==GameAnalyzer.Type.RIGHT)return true;
         if (awaiting != null) {
-            long sampleAt=f.modeAt > 0 ? f.modeAt : f.observedAt;
+            long sampleAt=f.modeAt;
             boolean acknowledged=sampleAt >= sentAt && (awaiting == GameAnalyzer.Type.DRILL
-                    ? f.mode == GameFeedback.Mode.ACTIVE : f.mode != GameFeedback.Mode.ACTIVE);
+                    ? f.mode == GameFeedback.Mode.ACTIVE
+                    : (f.mode == GameFeedback.Mode.READY || f.mode == GameFeedback.Mode.COOLING));
             if (acknowledged) {
                 if (awaiting == GameAnalyzer.Type.DRILL) {
                     float delay=Math.max(25, Math.min(350, sampleAt-sentAt));
