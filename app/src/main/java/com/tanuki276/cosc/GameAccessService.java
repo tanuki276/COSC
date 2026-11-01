@@ -176,7 +176,7 @@ public final class GameAccessService extends AccessibilityService {
             if(now-lastNodeTrace>5000)lastNodeTrace=now;
             synchronized(lock){
                 if(menu!=null)menu.recycle();menu=best==null?null:AccessibilityNodeInfo.obtain(best);
-                latest.paused=best!=null&&!menuLabel.contains("x2 ON");
+                if(sampledAt>=latest.resumeAt)latest.paused=best!=null&&!menuLabel.contains("x2 ON");
                 if(!pendingMenu.isEmpty()&&sampledAt>pendingMenuAt){
                     if(best==null||!menuLabel.equals(pendingMenu)){
                         if(pendingMenu.contains("ロングビット"))latest.tipReach=Math.min(34,latest.tipReach+8);
@@ -234,7 +234,7 @@ public final class GameAccessService extends AccessibilityService {
             if(wasPaused&&rc==0){
                 synchronized(lock){latest.paused=false;latest.resumeAt=SystemClock.uptimeMillis();}
                 Handler h=hudWorker;if(h!=null)h.post(this::refreshHud);
-                Handler w=worker;if(w!=null)w.post(this::sampleTree);
+                Handler w=worker;if(w!=null)w.postDelayed(this::sampleTree,80);
             }
             // Acceleration is a live HUD button. Touching it must not erase
             // obstacle tracks, lane acknowledgement, or drill acknowledgement.
