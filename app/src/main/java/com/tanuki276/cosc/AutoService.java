@@ -272,13 +272,13 @@ public final class AutoService extends Service {
             feedback=analyzer.usedFeedback;
             observedDepth=feedback.depth;
             if(feedback.mode==GameFeedback.Mode.ACTIVE)confirmedDrillFrames++;
-            if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>220){
+            if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>(analyzer.observedLaneExact?16:220)){
                 if(pendingLane<0)currentLane=analyzer.observedLane;
                 else if(analyzer.observedLane==pendingLane){
                     if(++laneVotes>=1){currentLane=pendingLane;pendingLane=-1;RunTrace.event("MOVE confirmed lane="+currentLane);}
                 }else{
                     laneVotes=0;
-                    if(capturedAt-lastMoveAt>500){
+                    if(capturedAt-lastMoveAt>(analyzer.observedLaneExact?250:500)){
                         currentLane=analyzer.observedLane;pendingLane=-1;
                         RunTrace.event("MOVE not reflected actual="+currentLane);
                     }
@@ -300,7 +300,7 @@ public final class AutoService extends Service {
                     +" mode="+feedback.mode+" heat="+feedback.heat+" css="+frameDensity
                     +" view="+feedback.viewWidth+"x"+feedback.viewHeight
                     +" lane="+currentLane+" pending="+pendingLane+" observed="+analyzer.observedLane
-                    +" action="+decision.type+" "+decision.reason);
+                    +" laneMarker="+analyzer.observedLaneExact+" action="+decision.type+" "+decision.reason);
                 lastTraceAt=now;
             }
 
@@ -333,9 +333,9 @@ public final class AutoService extends Service {
         GameFeedback current=access.read();
         if(!current.targetVisible || current.paused || current.gameOver)return;
         if(!timing.allow(d.type,current,SystemClock.uptimeMillis()))return;
-        // Keep the confirmed origin lane until vision observes the destination.
-        // In particular, do not cancel a pulse using the unconfirmed target lane.
-        if(pendingLane>=0)return;
+        // Movement waits for confirmation. A protective pulse and thermal
+        // cancellation can still act while either lane may be current.
+        if(pendingLane>=0&&!d.allowDuringMove)return;
         if(d.type!=GameAnalyzer.Type.NONE&&SystemClock.uptimeMillis()-analyzer.decisionAt>180){RunTrace.event("BLOCK expired decision");return;}
         if((d.type==GameAnalyzer.Type.DRILL||d.type==GameAnalyzer.Type.CANCEL)
                 &&SystemClock.uptimeMillis()-current.modeAt>450){RunTrace.event("BLOCK stale mode");return;}
@@ -378,7 +378,7 @@ public final class AutoService extends Service {
 
     private GameFeedback feedbackForFrame(GameAccessService access,long capturedAt){
         GameFeedback f=access.read();
-        f.atFrame(capturedAt,SystemClock.uptimeMillis());f.lastMoveAt=lastMoveAt;
+        f.atFrame(capturedAt,SystemClock.uptimeMillis());f.lastMoveAt=lastMoveAt;f.pendingLane=pendingLane;
         f.inputLatencyMs=timing.latencyMs();f.framePeriodMs=framePeriodMs;return f;
     }
 

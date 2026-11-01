@@ -39,7 +39,7 @@ public final class GameAccessService extends AccessibilityService {
     private HandlerThread workerThread,hudThread;
     private Handler hudWorker;
     private Handler worker;
-    private volatile boolean eventQueued;
+    private volatile boolean eventQueued,treeRefreshQueued;
     private final ArrayDeque<double[]> depthSamples=new ArrayDeque<>();
     private static final Pattern HEAT=Pattern.compile("(GREEN|YELLOW|ORANGE|RED)\\s+(READY|[0-9]+%|[0-9.]+s)");
     private static final Pattern HP=Pattern.compile("^([0-8])/([1-8])$");
@@ -134,10 +134,27 @@ public final class GameAccessService extends AccessibilityService {
     private void refreshHud(){
         List<AccessibilityNodeInfo> snapshot=new ArrayList<>();
         synchronized(lock){for(AccessibilityNodeInfo n:hudNodes)snapshot.add(AccessibilityNodeInfo.obtain(n));}
+        boolean modeRead=false;
         try{for(AccessibilityNodeInfo n:snapshot){
             long before=SystemClock.uptimeMillis();
-            if(n.refresh()&&n.isVisibleToUser())parse(label(n),(before+SystemClock.uptimeMillis())/2);
+            if(n.refresh()&&n.isVisibleToUser()){
+                String text=label(n);parse(text,(before+SystemClock.uptimeMillis())/2);
+                if(HEAT.matcher(text).matches())modeRead=true;
+            }
         }}finally{for(AccessibilityNodeInfo n:snapshot)n.recycle();}
+        // WebView can retire virtual node identities on a DOM update. Reacquire
+        // the HUD promptly instead of waiting through the 700 ms tree period.
+        boolean live;
+        synchronized(lock){live=latest.targetVisible&&!latest.paused&&!latest.gameOver&&latest.mode!=GameFeedback.Mode.UNKNOWN;}
+        if(!modeRead&&live)requestFreshTree();
+    }
+    private void requestFreshTree(){
+        Handler w=worker;if(w==null||treeRefreshQueued)return;
+        treeRefreshQueued=true;
+        w.postDelayed(()->{
+            try{if(worker!=null&&SystemClock.uptimeMillis()-lastTreeAt>=140){sampleTree();lastTreeAt=SystemClock.uptimeMillis();}}
+            finally{treeRefreshQueued=false;}
+        },Math.max(0,150-(SystemClock.uptimeMillis()-lastTreeAt)));
     }
     private void sampleTree(){
         long requested=SystemClock.uptimeMillis();AccessibilityNodeInfo r=root(true);long now=SystemClock.uptimeMillis();

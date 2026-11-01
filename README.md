@@ -21,9 +21,18 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
-- Retains the confirmed origin lane until a destination is observed. No second
-  move or drill toggle is sent while movement is unconfirmed; prolonged loss of
-  lane confirmation requests pause and stops rather than inventing a lane.
+- Reads the instantaneous selected-cell borders before falling back to animated
+  rig pixels. A confirmed border permits control on the next captured frame;
+  rig-only confirmation retains its animation-settling delay. Long paired border
+  segments and local colour contrast reject warm backgrounds and partial marks.
+- Holds a second movement until the first is observed. A protective drill pulse
+  can cover either possible lane during the transition; thermal cancellation
+  remains available. Other cancellation waits for lane confirmation.
+- Includes the selected-cell fill and thermal-glow composites in near-player
+  rock and ore colour detection. Recently exposed near-player ore can start a
+  track after a menu, using the same drill/particle mask as rocks.
+- Accepts post-command COOLING as evidence that a short pulse ran between HUD
+  samples, so missing its ACTIVE sample cannot hold all toggles for 700 ms.
 - Checks whole lane-occupancy intervals and adjacent-lane reachability across
   visible rows over a bounded two-second horizon. A rock crossing before the
   end of a movement blocks that destination. Destruction is not assumed when
@@ -52,6 +61,8 @@ editing, APK patching, or injection into CO-DUG is used.
 
 - Excludes intro images without a live HUD and resets on a dispatched new-game
   start, while preserving upgrade-pause snapshots within the same game.
+- Reacquires expired HUD node identities promptly when the live heat/mode read
+  fails, instead of waiting for the normal 700 ms full-tree polling period.
 - Uses recent verified control rectangles even when virtual AX node identities
   expire; foreground is still checked before the physical gesture.
 - Derives wide-layout CSS scale from button centre spacing (253.5 CSS px), not
@@ -97,8 +108,8 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.12.0 is a control and diagnostic revision. Physical-device survival to
-100000 m has not been verified. Validation for this revision consists of RGBA pixel-layout and lane-occupancy arithmetic checks, plus an APK
+Version 0.13.0 is a control and diagnostic revision. Physical-device survival to
+100000 m has not been verified. Validation for this revision consists of RGBA pixel-layout, lane-marker and control-state checks, lane-occupancy arithmetic, plus an APK
 build. The replay and emulator workflows are manual and have not been run for
 this revision.
 

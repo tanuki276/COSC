@@ -18,6 +18,7 @@ final class GameAnalyzer {
         final boolean urgent;
         int rowIndex = -1;
         int lane = -1;
+        boolean allowDuringMove;
         Decision(Type type, String reason) { this(type, 0, 0, reason, false); }
         Decision(Type type, float x, float y, String reason, boolean urgent) {
             this.type = type; xNorm = x; yNorm = y; this.reason = reason; this.urgent = urgent;
@@ -39,6 +40,7 @@ final class GameAnalyzer {
     }
     private int[] pixels;
     private int pixelWidth;
+    private int[] nearRock=ROCK,nearOre=ORE;
     // Tracks live in camera coordinates, independent of rounded/asynchronous HUD depth.
     private static final class VisualTrack {
         int id,lane,seen,absent;
@@ -53,10 +55,11 @@ final class GameAnalyzer {
     private boolean resumeSnapshotUsable;
     private float opticalVelocity, previousImageDepth=Float.NaN;
     int observedLane=-1;
+    boolean observedLaneExact;
     String scene="";
     GameFeedback usedFeedback;
     long decisionAt;
-    void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;previousImageDepth=Float.NaN;resumeSnapshotUsable=false;observedLane=-1;pulseAt=0;pausedAt=0;}
+    void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;previousImageDepth=Float.NaN;resumeSnapshotUsable=false;observedLane=-1;observedLaneExact=false;pulseAt=0;pausedAt=0;}
     void pause(GameFeedback f,long frame){
         if(pausedAt!=0)return;
         float v=opticalVelocity>0?opticalVelocity:f.speed()*3.25f;
@@ -101,8 +104,11 @@ final class GameAnalyzer {
         if(pixels==null||pixels.length!=size)pixels=new int[size];
         pixelWidth=b.getWidth();b.getPixels(pixels,0,pixelWidth,0,0,pixelWidth,b.getHeight());
         scale=Math.max(.01f,scale);
-        observedLane=detectPlayer(b,scale);
-        if(observedLane>=0&&frame-f.lastMoveAt>260)lane=observedLane;
+        observedLane=LaneMarker.detect(pixels,b.getWidth(),b.getHeight(),scale);
+        observedLaneExact=observedLane>=0;
+        if(!observedLaneExact)observedLane=detectPlayer(b,scale);
+        if(observedLane>=0&&(observedLaneExact||frame-f.lastMoveAt>260))lane=observedLane;
+        nearRock=tintedPalette(ROCK,f);nearOre=tintedPalette(ORE,f);
         List<ObjectHit>[] observed=detect(b,scale,lane);
         // Pixel work can take a substantial fraction of the collision window.
         // Read the current HUD after that work, then project to the decision time.
@@ -128,7 +134,7 @@ final class GameAnalyzer {
             }
             if(best==null){
                 // Don't create tracks from the player's drill/particles.
-                if(d<120&&l==lane&&(hit.ore||d<45))continue;
+                if(d<45&&l==lane)continue;
                 best=new VisualTrack();best.id=++sequence;best.lane=l;best.distance=d;best.at=frame;tracks.add(best);
             }else{
                 float dt=(frame-best.at)/1000f;
@@ -186,7 +192,9 @@ final class GameAnalyzer {
         // missed, even if the rock is still above that boundary right now.
         boolean missed=arrival<tip-24;
         if(fresh&&f.mode==GameFeedback.Mode.ACTIVE){
-            if(f.heat+80*((now-f.modeAt)/1000f+latency)>=88)return new Decision(Type.CANCEL,"heat guard: "+scene);
+            if(f.heat+80*((now-f.modeAt)/1000f+latency)>=88){
+                Decision guard=new Decision(Type.CANCEL,"heat guard: "+scene);guard.allowDuringMove=true;return guard;
+            }
             VisualTrack nearest=null;
             if(here!=null)for(VisualTrack t:tracks)if(t.id==here.rowIndex){nearest=t;break;}
             // An already-running drill does not incur a new activation latency.
@@ -201,6 +209,19 @@ final class GameAnalyzer {
             }
         }
         boolean ready=fresh&&f.mode==GameFeedback.Mode.READY&&f.heat>=0&&f.heat<48;
+        if(f.pendingLane>=0&&ready){
+            // The drill follows the logical lane immediately, even while the rig
+            // is still sliding. Cover either possible lane during that interval.
+            for(int l:new int[]{lane,f.pendingLane}){
+                ObjectHit target=next(objects[l],body-10*scale);
+                if(target==null)continue;
+                float gap=(target.y-body)/scale;
+                if(gap<=tip+12+lead&&gap-velocity*latency>=tip-24){
+                    Decision d=new Decision(Type.DRILL,"cover lane transition: "+scene);
+                    d.rowIndex=target.rowIndex;d.lane=l;d.allowDuringMove=true;return d;
+                }
+            }
+        }
         // Use every visible row and the time needed to confirm a move. Do not
         // assume a second pulse or a successful first hit to make a route safe.
         float secondDistance=Float.POSITIVE_INFINITY;
@@ -310,8 +331,9 @@ final class GameAnalyzer {
                     if(lane==currentLane&&y<h*.32f+80*scale
                             &&Math.abs(x-(left+laneW*(lane+.5f)))<22*scale)continue;
                     int c = pixels[y * pixelWidth + x];
-                    if (matches(c, ROCK, 16)) r++;
-                    else if (matches(c, ORE, 8)) o++;
+                    boolean near=lane==currentLane&&y<h*.32f+115*scale;
+                    if (matches(c, ROCK, 16)||(near&&matches(c,nearRock,12))) r++;
+                    else if (matches(c, ORE, 8)||(near&&matches(c,nearOre,8))) o++;
                 }
                 if (r + o >= Math.max(2, (x1 - x0) / 12)) {
                     if (first < 0) first = y;
@@ -334,6 +356,27 @@ final class GameAnalyzer {
             }
         }
         return out;
+    }
+    // The selected-cell fill and active glow are drawn on top of the rocks.
+    // Match those renderer colours as well as the unobscured fill palette.
+    static int blend(int base,int overlay,float alpha){
+        int r=Math.round(((base>>16)&255)*(1-alpha)+((overlay>>16)&255)*alpha);
+        int g=Math.round(((base>>8)&255)*(1-alpha)+((overlay>>8)&255)*alpha);
+        int b=Math.round((base&255)*(1-alpha)+(overlay&255)*alpha);
+        return (r<<16)|(g<<8)|b;
+    }
+    private int[] tintedPalette(int[] base,GameFeedback f){
+        boolean active=f.mode==GameFeedback.Mode.ACTIVE;
+        int stage=f.heat<22?0:f.heat<48?1:f.heat<72?2:3;
+        int glow=new int[]{0x67e8a5,0xffd166,0xff9f43,0xff596d}[stage];
+        float opacity=stage<2?.12f:stage==2?.14f:.18f;
+        int[] result=new int[base.length*(active?3:1)];
+        for(int i=0;i<base.length;i++){
+            int cell=blend(base[i],active?0xffd166:0xffffff,active?.15f:.055f);
+            result[i]=cell;
+            if(active){result[i+base.length]=blend(base[i],glow,opacity);result[i+base.length*2]=blend(cell,glow,opacity);}
+        }
+        return result;
     }
     private boolean matches(int c, int[] palette, int tolerance) {
         for (int p : palette)

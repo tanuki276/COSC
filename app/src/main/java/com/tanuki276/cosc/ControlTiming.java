@@ -15,10 +15,10 @@ final class ControlTiming {
         if (awaiting != null) {
             long sampleAt=f.modeAt;
             boolean acknowledged=sampleAt >= sentAt && (awaiting == GameAnalyzer.Type.DRILL
-                    ? f.mode == GameFeedback.Mode.ACTIVE
+                    ? (f.mode == GameFeedback.Mode.ACTIVE || f.mode == GameFeedback.Mode.COOLING)
                     : (f.mode == GameFeedback.Mode.READY || f.mode == GameFeedback.Mode.COOLING));
             if (acknowledged) {
-                if (awaiting == GameAnalyzer.Type.DRILL) {
+                if (awaiting == GameAnalyzer.Type.DRILL && f.mode == GameFeedback.Mode.ACTIVE) {
                     float delay=Math.max(25, Math.min(350, sampleAt-sentAt));
                     latencyMs=latencyMs*.65f+delay*.35f;
                 }
