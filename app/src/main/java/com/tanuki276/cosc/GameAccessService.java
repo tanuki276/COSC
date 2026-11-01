@@ -287,8 +287,9 @@ public final class GameAccessService extends AccessibilityService {
         // Rectangles come from a recent concrete-button tree sample. Virtual
         // AX node identities may expire on every DOM update; do not drop a shot
         // just because a cached node cannot refresh. tap() rechecks foreground.
-        RunTrace.event("CONTROL_TOUCH index="+control+" bounds="+box);
-        return box.isEmpty()?-4:tap(box.centerX(),box.centerY());
+        int rc=box.isEmpty()?-4:tap(box.centerX(),box.centerY());
+        RunTrace.event("CONTROL_TOUCH index="+control+" bounds="+box+" rc="+rc);
+        return rc;
     }
     // 0 = gesture completed; 1 = dispatched, completion still unknown.
     // A timeout before dispatch expires the queued request permanently.

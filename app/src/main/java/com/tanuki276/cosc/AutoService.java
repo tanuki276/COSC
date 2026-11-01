@@ -22,7 +22,6 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
 
-import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 
@@ -62,7 +61,8 @@ public final class AutoService extends Service {
     private int displayWidth;
     private int displayHeight;
     private int densityDpi;
-    private float densityScale;
+    private final RgbaSampler sampler=new RgbaSampler();
+    private int[] samplePixels;
     private int currentLane = 1;
     private int seenRunId;
     private int pendingLane=-1,laneVotes;
@@ -138,9 +138,8 @@ public final class AutoService extends Service {
             displayWidth = dm.widthPixels;
             displayHeight = dm.heightPixels;
             densityDpi = dm.densityDpi;
-            densityScale = Math.max(0.5f, dm.density);
 
-            captureThread = new HandlerThread("cosc-capture", Thread.MAX_PRIORITY);
+            captureThread = new HandlerThread("cosc-capture", android.os.Process.THREAD_PRIORITY_DEFAULT);
             captureThread.start();
             captureHandler = new Handler(captureThread.getLooper());
 
@@ -213,8 +212,6 @@ public final class AutoService extends Service {
         }
 
         Bitmap frame = null;
-        Bitmap scaled = null;
-        Bitmap cropped = null;
         long acquiredAt=SystemClock.uptimeMillis();
         long ageNanos=System.nanoTime()-image.getTimestamp();
         long capturedAt=ageNanos>=0&&ageNanos<2_000_000_000L?acquiredAt-ageNanos/1_000_000L:acquiredAt;
@@ -229,40 +226,41 @@ public final class AutoService extends Service {
                 lastMoveAt=0;RunTrace.event("NEW_RUN id="+seenRunId);
             }
             if(feedback.gameOver){RunTrace.event("GAME_OVER depth="+feedback.depth+" hp="+feedback.hp+" mode="+feedback.mode+" heat="+feedback.heat);notifyText("Stopped: collision/game over at "+feedback.depth+"m");mainHandler.post(this::stopAutomation);return;}
-            frame = imageToBitmap(image);
-            if (frame == null) return;
-
-            if(feedback.viewWidth>frame.getWidth()*.7f&&feedback.viewHeight>frame.getHeight()*.6f){
-                int left=Math.max(0,feedback.viewLeft),top=Math.max(0,feedback.viewTop);
-                int w=Math.min(feedback.viewWidth,frame.getWidth()-left),h=Math.min(feedback.viewHeight,frame.getHeight()-top);
-                if(w>0&&h>0)cropped=Bitmap.createBitmap(frame,left,top,w,h);
-            }
-            Bitmap source=cropped==null?frame:cropped;
-            int targetWidth = Math.min(480, source.getWidth());
-            int targetHeight = Math.max(1, Math.round(source.getHeight() * (targetWidth / (float) source.getWidth())));
-            scaled = source.getWidth() == targetWidth
-                    ? source
-                    : Bitmap.createScaledBitmap(source, targetWidth, targetHeight, false);
-
-            float captureScale=scaled.getWidth()/(float)source.getWidth();
-            float frameDensity=Math.max(.01f,(feedback.cssScale>0?feedback.cssScale:densityScale)*captureScale);
             long now=SystemClock.uptimeMillis();
-            if(lastFrameAt>0&&capturedAt>lastFrameAt)framePeriodMs=framePeriodMs*.8f+Math.min(400,capturedAt-lastFrameAt)*.2f;
-            lastFrameAt=capturedAt;
-            feedback.atFrame(capturedAt,now);feedback.lastMoveAt=lastMoveAt;
-            feedback.inputLatencyMs=timing.latencyMs();feedback.framePeriodMs=framePeriodMs;
-            observedDepth = feedback.depth;
-            if (feedback.mode == GameFeedback.Mode.ACTIVE) confirmedDrillFrames++;
+            observedDepth=feedback.depth;
+            // Menus and unavailable calibration need no screen-sized bitmap.
             if(feedback.paused)analyzer.pause(feedback,capturedAt);
-            if (now - lastMenuCheckAt > 400 && now - lastOverlayTapAt > 800 && checkMenu(access, now)) {
-                lastOverlayTapAt = now;
-                // Pause/resume keeps tracks safe through analyzer's paused-frame path.
-                RunTrace.event("MENU touch dispatched depth="+feedback.depth);
-                return;
+            if(now-lastMenuCheckAt>400&&now-lastOverlayTapAt>800&&checkMenu(access,now)){
+                lastOverlayTapAt=SystemClock.uptimeMillis();
+                RunTrace.event("MENU touch dispatched depth="+feedback.depth);return;
             }
             if(feedback.resumeAt>0&&capturedAt<feedback.resumeAt+32)return;
-            if(feedback.cssScale<=0){RunTrace.event("WAIT control calibration");return;}
-            GameAnalyzer.Decision decision = analyzer.analyze(scaled, currentLane, frameDensity, feedback, now);
+            if(feedback.cssScale<=0){
+                if(now-lastTraceAt>1000){RunTrace.event("WAIT control calibration");lastTraceAt=now;}return;
+            }
+            if(feedback.paused)return;
+            if(feedback.mode==GameFeedback.Mode.UNKNOWN||feedback.hp<0){
+                if(now-lastTraceAt>1000){RunTrace.event("WAIT live HUD mode="+feedback.mode+" hp="+feedback.hp);lastTraceAt=now;}return;
+            }
+            if(lastFrameAt>0&&capturedAt-lastFrameAt<50)return; // at most 20 perception frames/s
+            if(lastFrameAt>0&&capturedAt>lastFrameAt)
+                framePeriodMs=framePeriodMs*.8f+Math.min(400,capturedAt-lastFrameAt)*.2f;
+            lastFrameAt=capturedAt;
+            long sampleStartedAt=SystemClock.uptimeMillis();
+            CapturedFrame sampled=sampleImage(image,feedback);
+            if(sampled==null)return;
+            frame=sampled.bitmap;
+            long sampleMs=SystemClock.uptimeMillis()-sampleStartedAt;
+            float frameDensity=feedback.cssScale*sampled.scale;
+            feedback=feedbackForFrame(access,capturedAt);
+            long analysisStartedAt=SystemClock.uptimeMillis();
+            GameAnalyzer.Decision decision=analyzer.analyze(frame,currentLane,frameDensity,feedback,analysisStartedAt,
+                    SystemClock::uptimeMillis,()->feedbackForFrame(access,capturedAt));
+            now=SystemClock.uptimeMillis();
+            long visionMs=now-analysisStartedAt;
+            feedback=analyzer.usedFeedback;
+            observedDepth=feedback.depth;
+            if(feedback.mode==GameFeedback.Mode.ACTIVE)confirmedDrillFrames++;
             if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>220){
                 if(pendingLane<0)currentLane=analyzer.observedLane;
                 else if(analyzer.observedLane==pendingLane){
@@ -275,16 +273,20 @@ public final class AutoService extends Service {
                     }
                 }
             }
+            // Dispatch before writing/flushing the diagnostic record.
+            applyDecision(decision,now);
             if(now-lastTraceAt>100||decision.type!=GameAnalyzer.Type.NONE){
-                RunTrace.event("FRAME capture="+capturedAt+" depth="+feedback.depth+" hp="+feedback.hp
-                    +" depthAge="+(now-feedback.depthAt)+" modeAge="+(now-feedback.modeAt)
+                long at=analyzer.decisionAt;
+                RunTrace.event("FRAME capture="+capturedAt+" decision="+at+" age="+(at-capturedAt)
+                    +" sample="+frame.getWidth()+"x"+frame.getHeight()+" sampleMs="+sampleMs+" visionMs="+visionMs
+                    +" depth="+feedback.depth+" hp="+feedback.hp
+                    +" depthAge="+(at-feedback.depthAt)+" modeAge="+(at-feedback.modeAt)
                     +" mode="+feedback.mode+" heat="+feedback.heat+" css="+frameDensity
                     +" view="+feedback.viewWidth+"x"+feedback.viewHeight
                     +" lane="+currentLane+" pending="+pendingLane+" observed="+analyzer.observedLane
                     +" action="+decision.type+" "+decision.reason);
                 lastTraceAt=now;
             }
-            applyDecision(decision, now);
 
             if (decision.urgent || now - lastStatusAt > 650) {
                 notifyText("VISION · L" + (currentLane + 1) + " · " + decision.reason);
@@ -297,8 +299,6 @@ public final class AutoService extends Service {
                 lastStatusAt = SystemClock.uptimeMillis();
             }
         } finally {
-            if (scaled != null && scaled != frame && scaled != cropped) scaled.recycle();
-            if (cropped != null && cropped != frame) cropped.recycle();
             if (frame != null) frame.recycle();
             image.close();
             processingFrame.set(false);
@@ -356,21 +356,34 @@ public final class AutoService extends Service {
         return access == null ? -3 : access.tapControl(control);
     }
 
-    private Bitmap imageToBitmap(Image image) {
-        Image.Plane[] planes = image.getPlanes();
-        if (planes.length == 0) return null;
-        Image.Plane plane = planes[0];
-        ByteBuffer buffer = plane.getBuffer();
-        int pixelStride = plane.getPixelStride();
-        int rowStride = plane.getRowStride();
-        int rowPadding = rowStride - pixelStride * image.getWidth();
-        int paddedWidth = image.getWidth() + rowPadding / Math.max(1, pixelStride);
-        Bitmap padded = Bitmap.createBitmap(paddedWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
-        padded.copyPixelsFromBuffer(buffer);
-        if (paddedWidth == image.getWidth()) return padded;
-        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, image.getWidth(), image.getHeight());
-        padded.recycle();
-        return cropped;
+    private GameFeedback feedbackForFrame(GameAccessService access,long capturedAt){
+        GameFeedback f=access.read();
+        f.atFrame(capturedAt,SystemClock.uptimeMillis());f.lastMoveAt=lastMoveAt;
+        f.inputLatencyMs=timing.latencyMs();f.framePeriodMs=framePeriodMs;return f;
+    }
+
+    private static final class CapturedFrame {
+        final Bitmap bitmap;final float scale;
+        CapturedFrame(Bitmap bitmap,float scale){this.bitmap=bitmap;this.scale=scale;}
+    }
+    private CapturedFrame sampleImage(Image image,GameFeedback f){
+        Image.Plane[] planes=image.getPlanes();if(planes.length==0)return null;
+        int imageWidth=image.getWidth(),imageHeight=image.getHeight();
+        int left=0,top=0,width=imageWidth,height=imageHeight;
+        if(f.viewWidth>imageWidth*.7f&&f.viewHeight>imageHeight*.6f
+                &&f.viewLeft<imageWidth&&f.viewTop<imageHeight){
+            left=Math.max(0,f.viewLeft);top=Math.max(0,f.viewTop);
+            width=Math.min(f.viewWidth,imageWidth-left);height=Math.min(f.viewHeight,imageHeight-top);
+        }
+        int outWidth=Math.min(360,width);
+        int outHeight=Math.max(1,Math.round(height*(outWidth/(float)width)));
+        int count=outWidth*outHeight;
+        if(samplePixels==null||samplePixels.length!=count)samplePixels=new int[count];
+        Image.Plane plane=planes[0];
+        sampler.sample(plane.getBuffer(),imageWidth,imageHeight,plane.getRowStride(),plane.getPixelStride(),
+                left,top,width,height,outWidth,outHeight,samplePixels);
+        Bitmap bitmap=Bitmap.createBitmap(samplePixels,outWidth,outHeight,Bitmap.Config.ARGB_8888);
+        return new CapturedFrame(bitmap,outWidth/(float)width);
     }
 
     private void launchTargetDirect() {

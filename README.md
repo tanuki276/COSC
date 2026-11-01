@@ -21,6 +21,17 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
+- Uses current decision time and a HUD snapshot refreshed after pixel detection;
+  processing time is included in the obstacle projection. Diagnostic frames
+  include decision age, pixel sampling time, and vision time.
+- Samples RGBA image planes directly into a 360-pixel-wide analysis frame, with
+  row/pixel stride and crop handling. No full-resolution Bitmap is allocated.
+  Perception is capped at 20 frames/s, and the capture worker uses Android's
+  default OS thread priority rather than Java's unrelated priority constant.
+- While the drill is active, a rock is considered missed only when its captured
+  position is beyond the window without destruction evidence. A new activation's
+  latency is not applied again to an active pulse.
+
 - Excludes intro images without a live HUD and resets on a dispatched new-game
   start, while preserving upgrade-pause snapshots within the same game.
 - Uses recent verified control rectangles even when virtual AX node identities
@@ -28,16 +39,12 @@ editing, APK patching, or injection into CO-DUG is used.
 - Derives wide-layout CSS scale from button centre spacing (253.5 CSS px), not
   AX gaps that may shrink when touch rectangles expand. Narrow layouts use the
   WebView's Android density.
-
-
 - Freezes obstacle positions through upgrade menus and rebases the tracking
   clock to the completed resume touch. Refreshes the HUD/menu immediately after
   selection, and rejects pre-resume/transition frames.
 - Retains rock side silhouettes near the drill after resume.
 - Evaluates the next two rows with adjacent-lane reachability, landing safety,
   pulse coverage and recovery time before committing to a route.
-
-
 - Detects all eight rock fill palettes, including dark basalt/void/error stone.
 - Tracks rock/ore centres directly across captured images, estimates scroll speed,
   and retains occluded targets. Rounded/asynchronous HUD depth does not position rocks.
@@ -74,9 +81,10 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.10.0 is a control and diagnostic revision. Physical-device survival to
-100000 m has not been verified. This revision is compiled only; the replay and
-emulator workflows are manual and have not been run for this revision.
+Version 0.11.0 is a control and diagnostic revision. Physical-device survival to
+100000 m has not been verified. Validation for this revision consists of RGBA pixel-layout checks and an APK
+build. The replay and emulator workflows are manual and have not been run for
+this revision.
 
 ## Build and optional historical harness
 

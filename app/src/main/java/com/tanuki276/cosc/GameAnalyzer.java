@@ -4,9 +4,9 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.HashMap;
 import java.util.Comparator;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /** Palette/shape detector calibrated to the unmodified CO-DUG canvas renderer. */
 final class GameAnalyzer {
@@ -54,6 +54,8 @@ final class GameAnalyzer {
     private float opticalVelocity;
     int observedLane=-1;
     String scene="";
+    GameFeedback usedFeedback;
+    long decisionAt;
     void reset(){tracks.clear();sequence=0;previousFrame=0;previousDepth=0;opticalVelocity=0;observedLane=-1;pulseAt=0;pausedAt=0;}
     void pause(GameFeedback f,long frame){
         if(pausedAt!=0)return;
@@ -70,6 +72,11 @@ final class GameAnalyzer {
     Decision analyze(Bitmap b,int lane,float scale,long ignored){return Decision.none("HUD feedback required");}
 
     Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now){
+        return analyze(b,lane,scale,f,now,()->now,()->f);
+    }
+    Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now,
+                     LongSupplier clock,Supplier<GameFeedback> hud){
+        usedFeedback=f;decisionAt=now;
         if(b==null||!f.targetVisible||now-f.observedAt>1200)return Decision.none("waiting for target");
         if(runId!=f.runId){reset();runId=f.runId;}
         // Intro/background frames have no live HUD and must not seed tracks.
@@ -94,6 +101,16 @@ final class GameAnalyzer {
         observedLane=detectPlayer(b,scale);
         if(observedLane>=0&&frame-f.lastMoveAt>260)lane=observedLane;
         List<ObjectHit>[] observed=detect(b,scale,lane);
+        // Pixel work can take a substantial fraction of the collision window.
+        // Read the current HUD after that work, then project to the decision time.
+        GameFeedback current=hud.get();
+        now=clock.getAsLong();usedFeedback=current;decisionAt=now;
+        if(current.runId!=f.runId || !current.targetVisible || current.gameOver)
+            return Decision.none("target/run changed during vision");
+        f=current;
+        if(f.paused){pause(f,frame);return Decision.none("menu during vision");}
+        if(f.mode==GameFeedback.Mode.UNKNOWN||f.hp<0)
+            return Decision.none("waiting for refreshed HUD");
         float body=b.getHeight()*.32f,tip=67+f.tipReach;
         float fallback=f.speed()*3.25f;
         float velocity=opticalVelocity>0?opticalVelocity:fallback;
@@ -126,6 +143,7 @@ final class GameAnalyzer {
             opticalVelocity=opticalVelocity>0?opticalVelocity*.8f+measured*.2f:measured;
             velocity=opticalVelocity;
         }
+        now=clock.getAsLong();decisionAt=now;
         final float v=velocity;
         tracks.removeIf(t->t.predict(frame,v)<-45||frame-t.lastSeen>2500);
         @SuppressWarnings("unchecked")
@@ -154,7 +172,7 @@ final class GameAnalyzer {
             for(int i=0;i<Math.min(4,objects[l].size());i++)lanes.append(Math.round((objects[l].get(i).y-body)/scale)).append(',');
             lanes.append(']');
         }
-        scene="v="+Math.round(velocity)+" tracks="+tracks.size()+" lane="+lane+" next="+Math.round(distance)+" tip="+tip+lanes;
+        scene="v="+Math.round(velocity)+" tracks="+tracks.size()+" lane="+lane+" next="+(Float.isFinite(distance)?Math.round(distance):"clear")+" tip="+tip+lanes;
         boolean fresh=f.modeAt>0&&now-f.modeAt<450;
         float latency=Math.max(.04f,Math.min(.4f,f.inputLatencyMs/1000f));
         // Use one bounded pulse. Never add a whole slow capture interval to
@@ -165,10 +183,19 @@ final class GameAnalyzer {
         // missed, even if the rock is still above that boundary right now.
         boolean missed=arrival<tip-24;
         if(fresh&&f.mode==GameFeedback.Mode.ACTIVE){
-            if(fresh&&f.heat>=74)return new Decision(Type.CANCEL,"heat guard");
-            if(fresh&&distance>tip+velocity*.45f)return new Decision(Type.CANCEL,"clear ahead");
-            if(!missed)return Decision.none("pulse: "+scene);
-            // A missed rock below the tip still requires an escape while active.
+            if(f.heat>=74)return new Decision(Type.CANCEL,"heat guard: "+scene);
+            VisualTrack nearest=null;
+            if(here!=null)for(VisualTrack t:tracks)if(t.id==here.rowIndex){nearest=t;break;}
+            // An already-running drill does not incur a new activation latency.
+            // Escape only if the captured rock has passed the actual window
+            // without destruction evidence, or is still visibly present below it.
+            boolean seenBehind=nearest!=null&&nearest.predict(frame,velocity)<tip-26
+                    &&(!nearest.covered||matched.contains(nearest.id));
+            missed=seenBehind;
+            if(!missed){
+                if(distance>tip+velocity*.45f)return new Decision(Type.CANCEL,"clear ahead: "+scene);
+                return Decision.none("active pulse retained image="+(nearest==null?"clear":Math.round(nearest.predict(frame,velocity)))+": "+scene);
+            }
         }
         boolean ready=fresh&&f.mode==GameFeedback.Mode.READY&&f.heat>=0&&f.heat<48;
         int pairLane=pairRoute(objects,lane,body,tip,velocity,latency,scale,ready,f);
