@@ -122,8 +122,8 @@ public final class MainActivity extends Activity {
                         Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain")
                             .putExtra(Intent.EXTRA_SUBJECT,"COSC diagnostics")
                             .putExtra(Intent.EXTRA_STREAM,uri)
-                            .setClipData(android.content.ClipData.newRawUri("COSC diagnostics",uri))
                             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        share.setClipData(android.content.ClipData.newRawUri("COSC diagnostics",uri));
                         startActivity(Intent.createChooser(share,"ログファイルを共有"));
                     }
                 }catch(RuntimeException e){reportMessage("開けませんでした。ファイル保存またはコピーを使用してください: "+e.getMessage());}});
