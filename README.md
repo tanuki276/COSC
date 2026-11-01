@@ -21,6 +21,24 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Controller
 
+- Rejects palette matches that have no contrast against the background beside
+  the rock. This prevents the selected-cell fill from repeatedly creating a
+  near-player phantom obstacle and provoking alternating lane changes.
+- Gives an interceptable READY drill priority over rerouting, waits for cooldown
+  when it can finish in time, and holds a recent route unless collision timing
+  requires another move. One reachability planner chooses escape directions;
+  a competing local rock-count fallback has been removed.
+- Detects pause headings and missing gameplay controls independently of finding
+  an upgrade button. A missing player/selection marker suspends optical tracking
+  and requests a menu refresh, rather than timing out a move against a modal.
+- Finds bounded, uniquely named actionable menu nodes even when WebView exposes
+  them as Views, and traverses visible descendants of non-visible containers.
+  Menu touches use recent concrete bounds and wait for observed gameplay controls
+  before releasing the pause gate. A pending move is cleared when a menu is seen.
+- Static pixel regressions cover an empty selected cell over repeated captures,
+  all eight rock palettes near and far, an obscured board, and drilling the first
+  of two rows rather than making an avoidable direction change.
+
 - Reads the instantaneous selected-cell borders before falling back to animated
   rig pixels. A confirmed border permits control on the next captured frame;
   rig-only confirmation retains its animation-settling delay. Long paired border
@@ -108,7 +126,7 @@ editing, APK patching, or injection into CO-DUG is used.
 
 ## Validation status
 
-Version 0.13.0 is a control and diagnostic revision. Physical-device survival to
+Version 0.14.0 is a control and diagnostic revision. Physical-device survival to
 100000 m has not been verified. Validation for this revision consists of RGBA pixel-layout, lane-marker and control-state checks, lane-occupancy arithmetic, plus an APK
 build. The replay and emulator workflows are manual and have not been run for
 this revision.

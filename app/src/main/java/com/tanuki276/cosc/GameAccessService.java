@@ -30,7 +30,9 @@ public final class GameAccessService extends AccessibilityService {
     private final Rect[] controls={new Rect(),new Rect(),new Rect()};
     private AccessibilityNodeInfo menu,pauseControl;
     private final List<AccessibilityNodeInfo> hudNodes=new ArrayList<>();
-    private long lastTreeAt,controlsAt,observationFloor,hpAt;
+    private long lastTreeAt,controlsAt,observationFloor,hpAt,menuAt;
+    private long pauseObservedAt;
+    private String lastUiSummary="";
     private String pendingMenu="";
     private boolean pendingMenuPaused;
     private long pendingMenuAt;
@@ -129,6 +131,7 @@ public final class GameAccessService extends AccessibilityService {
                 latest.depth=depth;latest.depthAt=at;
             }
             if(text.equals("DRILL BROKEN"))latest.gameOver=true;
+            if(isPauseHeading(text)&&at>=pauseObservedAt){latest.paused=true;pauseObservedAt=at;}
         }
     }
     private void refreshHud(){
@@ -148,7 +151,7 @@ public final class GameAccessService extends AccessibilityService {
         synchronized(lock){live=latest.targetVisible&&!latest.paused&&!latest.gameOver&&latest.mode!=GameFeedback.Mode.UNKNOWN;}
         if(!modeRead&&live)requestFreshTree();
     }
-    private void requestFreshTree(){
+    void requestFreshTree(){
         Handler w=worker;if(w==null||treeRefreshQueued)return;
         treeRefreshQueued=true;
         w.postDelayed(()->{
@@ -167,11 +170,12 @@ public final class GameAccessService extends AccessibilityService {
             if(!target)return;
             collect(r,nodes);
             synchronized(lock){for(AccessibilityNodeInfo n:hudNodes)n.recycle();hudNodes.clear();}
-            AccessibilityNodeInfo best=null;int score=0;String bestLabel="";
+            AccessibilityNodeInfo best=null;int score=0;String bestLabel="";boolean overlay=false;
             Rect[] found={new Rect(),new Rect(),new Rect()};Rect viewport=new Rect();
             AccessibilityNodeInfo[] buttons=new AccessibilityNodeInfo[3];
             for(AccessibilityNodeInfo n:nodes){
                 String text=label(n);parse(text,sampledAt);
+                if(isPauseHeading(text))overlay=true;
                 if(HEAT.matcher(text).matches()||DEPTH.matcher(text).matches()||HP.matcher(text).matches())
                     synchronized(lock){hudNodes.add(AccessibilityNodeInfo.obtain(n));}
                 String id=String.valueOf(n.getViewIdResourceName());
@@ -187,23 +191,33 @@ public final class GameAccessService extends AccessibilityService {
                     Rect bounds=new Rect();n.getBoundsInScreen(bounds);
                     RunTrace.event("BUTTON label="+nodeText(n)+" class="+n.getClassName()+" bounds="+bounds);
                 }
-                if(!isButton)continue;
+                if(!isButton&&!n.isClickable()&&(n.getActions()&AccessibilityNodeInfo.ACTION_CLICK)==0)continue;
+                if("android.webkit.WebView".equals(String.valueOf(n.getClassName())))continue;
                 String button=nodeText(n);int s=menuScore(button);
-                if(s>score&&n.isEnabled()){best=n;score=s;bestLabel=button;}
+                if(s>score&&isMenuAction(n,button)){best=n;score=s;bestLabel=button;}
             }
             if(now-lastNodeTrace>5000)lastNodeTrace=now;
+            boolean allControls=!found[0].isEmpty()&&!found[1].isEmpty()&&!found[2].isEmpty();
+            boolean anyControls=!found[0].isEmpty()||!found[1].isEmpty()||!found[2].isEmpty();
             synchronized(lock){
-                if(menu!=null)menu.recycle();menu=best==null?null:AccessibilityNodeInfo.obtain(best);menuLabel=bestLabel;
-                if(sampledAt>=latest.resumeAt)latest.paused=best!=null&&!menuLabel.contains("x2 ON");
+                boolean wasPaused=latest.paused;
+                if(menu!=null)menu.recycle();menu=best==null?null:AccessibilityNodeInfo.obtain(best);menuLabel=bestLabel;menuAt=now;
+                if(sampledAt>=pauseObservedAt){
+                    latest.paused=overlay||(best!=null&&!menuLabel.contains("x2 ON"))||!anyControls;
+                }
                 if(!pendingMenu.isEmpty()&&sampledAt>pendingMenuAt){
-                    if(best==null||!menuLabel.equals(pendingMenu)){
+                    if((allControls&&!overlay)||(best!=null&&!menuLabel.equals(pendingMenu))){
                         if(pendingMenu.contains("ロングビット"))latest.tipReach=Math.min(34,latest.tipReach+8);
+                        if(pendingMenuPaused&&!latest.paused){latest.resumeAt=pendingMenuAt;depthSamples.clear();}
                         RunTrace.event("MENU_CONFIRMED label="+pendingMenu);
                         pendingMenu="";
                     }else if(now-pendingMenuAt>1200){
                         RunTrace.event("MENU_NOT_REFLECTED label="+pendingMenu);pendingMenu="";
                     }
                 }
+                if(wasPaused&&!latest.paused&&latest.resumeAt<pauseObservedAt){latest.resumeAt=sampledAt;depthSamples.clear();}
+                String ui="paused="+latest.paused+" overlay="+overlay+" controls="+allControls+" choice="+bestLabel;
+                if(!ui.equals(lastUiSummary)){RunTrace.event("UI "+ui);lastUiSummary=ui;}
                 if(!viewport.isEmpty()){latest.viewLeft=viewport.left;latest.viewTop=viewport.top;
                     latest.viewWidth=viewport.width();latest.viewHeight=viewport.height();}
                 if(!found[0].isEmpty()&&!found[1].isEmpty()&&!found[2].isEmpty()){
@@ -223,6 +237,25 @@ public final class GameAccessService extends AccessibilityService {
                 }
             }
         }finally{for(AccessibilityNodeInfo n:nodes)n.recycle();r.recycle();}
+    }
+    private static boolean isPauseHeading(String text){
+        return text.equals("DRILL UPGRADE")||text.equals("DRILL BROKEN")||text.equals("SYSTEM STANDBY")
+                ||text.equals("ひと休み。");
+    }
+    private boolean isMenuAction(AccessibilityNodeInfo n,String text){
+        String cls=String.valueOf(n.getClassName());
+        if(!n.isVisibleToUser()||!n.isEnabled()||cls.equals("android.webkit.WebView"))return false;
+        boolean actionable=cls.equals("android.widget.Button")||n.isClickable()
+                ||(n.getActions()&AccessibilityNodeInfo.ACTION_CLICK)!=0;
+        if(!actionable)return false;
+        int names=0;
+        for(String name:new String[]{"高トルクモーター","高速クラッチ","冷却フィン","ロングビット","鉱石粉砕ヘッド",
+                "増設フレーム","ポイント磁石","現地修理","補給パック","掘削を開始","もう一回","掘削を再開","x2 ON"})
+            if(text.contains(name))names++;
+        if(names!=1)return false;
+        Rect box=new Rect();n.getBoundsInScreen(box);
+        int width=getResources().getDisplayMetrics().widthPixels,height=getResources().getDisplayMetrics().heightPixels;
+        return !box.isEmpty()&&box.width()<=width&&box.height()<height*.5f;
     }
     private int menuScore(String t){
         synchronized(lock){if(latest.hp>=0&&latest.hp<=2&&t.contains("現地修理"))return 150;}
@@ -245,13 +278,12 @@ public final class GameAccessService extends AccessibilityService {
     boolean handleMenu(){
         AccessibilityNodeInfo action;String chosen;boolean wasPaused;
         synchronized(lock){
-            if(menu==null||!pendingMenu.isEmpty())return false;
+            if(menu==null||!pendingMenu.isEmpty()||SystemClock.uptimeMillis()-menuAt>1200)return false;
             action=AccessibilityNodeInfo.obtain(menu);chosen=menuLabel;wasPaused=latest.paused;
         }
         try{
-            if(!action.refresh()||!action.isVisibleToUser()
-                    ||!"android.widget.Button".equals(String.valueOf(action.getClassName())))return false;
-            if(!nodeText(action).equals(chosen))return false;
+            // Use the recently observed concrete menu bounds. WebView retires
+            // node identities, so refresh() must not discard a valid choice.
             Rect box=new Rect();action.getBoundsInScreen(box);if(box.isEmpty())return false;
             int rc=tap(box.centerX(),box.centerY());
             RunTrace.event("MENU_TOUCH label="+chosen+" bounds="+box+" rc="+rc);
@@ -266,10 +298,7 @@ public final class GameAccessService extends AccessibilityService {
                 }
             }
             if(wasPaused&&rc==0){
-                synchronized(lock){
-                    latest.paused=false;latest.resumeAt=SystemClock.uptimeMillis();
-                    depthSamples.clear(); // do not derive speed from time spent in the menu
-                }
+                // Keep the modal gate closed until live controls are observed.
                 Handler h=hudWorker;if(h!=null)h.post(this::refreshHud);
                 Handler w=worker;if(w!=null)w.postDelayed(this::sampleTree,80);
             }
@@ -286,7 +315,8 @@ public final class GameAccessService extends AccessibilityService {
     }
     private static void collect(AccessibilityNodeInfo n,List<AccessibilityNodeInfo> out){
         for(int i=0;i<n.getChildCount();i++){AccessibilityNodeInfo c=n.getChild(i);if(c!=null){
-            if(c.isVisibleToUser()){out.add(c);collect(c,out);}else c.recycle();
+            if(c.isVisibleToUser()){out.add(c);collect(c,out);}
+            else {try{collect(c,out);}finally{c.recycle();}}
         }}
     }
     boolean pauseForCaptureFailure(){

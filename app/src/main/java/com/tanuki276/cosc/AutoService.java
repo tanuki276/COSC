@@ -233,17 +233,18 @@ public final class AutoService extends Service {
                 RunTrace.event("DAMAGE depth="+feedback.depth+" hp="+previousHp+"->"+feedback.hp+" lastScene="+analyzer.scene);
             if(feedback.hp>=0)previousHp=feedback.hp;
             // Menus and unavailable calibration need no screen-sized bitmap.
-            if(feedback.paused)analyzer.pause(feedback,capturedAt);
-            if(now-lastMenuCheckAt>400&&now-lastOverlayTapAt>800&&checkMenu(access,now)){
+            if(feedback.paused){
+                analyzer.pause(feedback,capturedAt);
+                if(pendingLane>=0){RunTrace.event("MENU suspends pending move="+pendingLane);pendingLane=-1;laneVotes=0;}
+            }
+            if(now-lastMenuCheckAt>200&&now-lastOverlayTapAt>800&&checkMenu(access,now)){
                 lastOverlayTapAt=SystemClock.uptimeMillis();
-                RunTrace.event("MENU touch dispatched depth="+feedback.depth);
-                GameFeedback resumed=feedbackForFrame(access,capturedAt);
-                if(resumed.resumeAt>lastResumeAt){
-                    lastResumeAt=resumed.resumeAt;timing.resume(resumed.resumeAt);
-                    GameAnalyzer.Decision escape=analyzer.afterMenuResume(currentLane,resumed,SystemClock.uptimeMillis());
-                    applyDecision(escape,SystemClock.uptimeMillis());
-                }
-                return;
+                RunTrace.event("MENU touch dispatched depth="+feedback.depth);return;
+            }
+            if(!feedback.paused&&feedback.resumeAt>lastResumeAt){
+                lastResumeAt=feedback.resumeAt;timing.resume(feedback.resumeAt);
+                GameAnalyzer.Decision escape=analyzer.afterMenuResume(currentLane,feedbackForFrame(access,capturedAt),now);
+                applyDecision(escape,now);
             }
             if(feedback.resumeAt>0&&capturedAt<feedback.resumeAt+32)return;
             if(feedback.cssScale<=0){
@@ -271,6 +272,11 @@ public final class AutoService extends Service {
             long visionMs=now-analysisStartedAt;
             feedback=analyzer.usedFeedback;
             observedDepth=feedback.depth;
+            if(analyzer.needsMenuScan){
+                access.requestFreshTree();
+                if(now-lastTraceAt>300){RunTrace.event("WAIT obscured board depth="+feedback.depth+" pending="+pendingLane);lastTraceAt=now;}
+                return;
+            }
             if(feedback.mode==GameFeedback.Mode.ACTIVE)confirmedDrillFrames++;
             if(analyzer.observedLane>=0&&capturedAt-lastMoveAt>(analyzer.observedLaneExact?16:220)){
                 if(pendingLane<0)currentLane=analyzer.observedLane;

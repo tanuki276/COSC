@@ -53,9 +53,9 @@ final class GameAnalyzer {
     private int sequence,previousDepth,previousWidth,runId=-1;
     private long previousFrame,pulseAt,pausedAt;
     private boolean resumeSnapshotUsable;
-    private float opticalVelocity, previousImageDepth=Float.NaN;
+    private float opticalVelocity, previousImageDepth=Float.NaN, frozenDepth;
     int observedLane=-1;
-    boolean observedLaneExact;
+    boolean observedLaneExact, needsMenuScan;
     String scene="";
     GameFeedback usedFeedback;
     long decisionAt;
@@ -67,7 +67,7 @@ final class GameAnalyzer {
         float progress=Math.max(0,f.depth-depthAtImage)*3.25f;
         resumeSnapshotUsable=previousFrame>0&&frame-previousFrame<800&&observedLane>=0
                 &&progress<=v*.8f&&frame-f.depthAt<450;
-        pausedAt=previousFrame>0?previousFrame:frame;
+        pausedAt=previousFrame>0?previousFrame:frame;frozenDepth=f.depth;
         for(VisualTrack t:tracks){t.distance=t.predict(pausedAt,v)-progress;t.at=pausedAt;}
     }
     void accepted(Decision d) { }
@@ -82,7 +82,7 @@ final class GameAnalyzer {
     }
     Decision analyze(Bitmap b,int lane,float scale,GameFeedback f,long now,
                      LongSupplier clock,Supplier<GameFeedback> hud){
-        usedFeedback=f;decisionAt=now;
+        usedFeedback=f;decisionAt=now;needsMenuScan=false;
         if(b==null||!f.targetVisible||now-f.observedAt>1200)return Decision.none("waiting for target");
         if(runId!=f.runId){reset();runId=f.runId;}
         // Intro/background frames have no live HUD and must not seed tracks.
@@ -91,13 +91,6 @@ final class GameAnalyzer {
         }
         long frame=f.frameAt>0?f.frameAt:now;
         if(f.paused){pause(f,frame);return Decision.none("menu: tracks frozen");}
-        if(pausedAt>0){
-            long resumed=f.resumeAt>=pausedAt?Math.min(frame,f.resumeAt):frame;
-            long elapsed=Math.max(0,resumed-pausedAt);
-            for(VisualTrack t:tracks){t.at+=elapsed;t.lastSeen+=elapsed;}
-            if(pulseAt>0)pulseAt+=elapsed;
-            previousFrame=resumed;pausedAt=0;
-        }
         if(f.depth+20<previousDepth || previousWidth!=b.getWidth())reset();
         previousDepth=f.depth;previousWidth=b.getWidth();
         int size=b.getWidth()*b.getHeight();
@@ -107,7 +100,23 @@ final class GameAnalyzer {
         observedLane=LaneMarker.detect(pixels,b.getWidth(),b.getHeight(),scale);
         observedLaneExact=observedLane>=0;
         if(!observedLaneExact)observedLane=detectPlayer(b,scale);
+        if(observedLane<0){
+            // A modal blurs the board while the old HUD continues to refresh.
+            // Never turn that backdrop into rocks or time out a move on it.
+            needsMenuScan=true;pause(f,frame);
+            scene="board obscured: waiting for menu/rig visibility";
+            return Decision.none(scene);
+        }
         if(observedLane>=0&&(observedLaneExact||frame-f.lastMoveAt>260))lane=observedLane;
+        if(pausedAt>0){
+            boolean confirmedPause=f.resumeAt>=pausedAt;
+            long resumed=confirmedPause?Math.min(frame,f.resumeAt):frame;
+            long elapsed=Math.max(0,resumed-pausedAt);
+            float hiddenProgress=confirmedPause?0:Math.max(0,f.imageDepth()-frozenDepth)*3.25f;
+            for(VisualTrack t:tracks){t.at+=elapsed;t.lastSeen+=elapsed;t.distance-=hiddenProgress;}
+            if(pulseAt>0&&confirmedPause)pulseAt+=elapsed;
+            previousFrame=resumed;pausedAt=0;
+        }
         nearRock=tintedPalette(ROCK,f);nearOre=tintedPalette(ORE,f);
         List<ObjectHit>[] observed=detect(b,scale,lane);
         // Pixel work can take a substantial fraction of the collision window.
@@ -222,39 +231,29 @@ final class GameAnalyzer {
                 }
             }
         }
-        // Use every visible row and the time needed to confirm a move. Do not
-        // assume a second pulse or a successful first hit to make a route safe.
-        float secondDistance=Float.POSITIVE_INFINITY;
-        if(here!=null)for(ObjectHit h:objects[lane])if(h.y>here.y+40*scale){secondDistance=(h.y-body)/scale;break;}
-        boolean tightPair=(secondDistance-distance)/velocity<1.15f;
-        int pairLane=(!ready||missed||tightPair)
-                ?LaneSafety.choose(distances(objects,body,scale),lane,velocity,latency+.06f,f.framePeriodMs/1000f):lane;
-        if(pairLane!=lane&&distance<tip+velocity*1.0f){
-            Decision d=new Decision(pairLane<lane?Type.LEFT:Type.RIGHT,0,0,"two-row route: "+scene,missed);
-            d.lane=lane;return d;
+        // A confirmed usable drill is the first choice. Do not leave a
+        // breakable row merely because a hypothetical path has fewer rocks.
+        if(ready&&!missed){
+            if(distance<=tip+12+lead){
+                Decision d=new Decision(Type.DRILL,"intercept: "+scene);d.rowIndex=here.rowIndex;d.lane=lane;return d;
+            }
+            return Decision.none("hold lane for drill: "+scene);
         }
-        if(ready&&distance<=tip+12+lead&&!missed){
-            Decision d=new Decision(Type.DRILL,"intercept: "+scene);d.rowIndex=here.rowIndex;d.lane=lane;return d;
-        }
-        // Don't switch lanes just because cooldown is nonzero. If recovery
-        // completes with time to dispatch before the leading edge, stay put.
         float timeToWindow=(distance-tip-15)/velocity;
         if(fresh&&f.mode==GameFeedback.Mode.COOLING&&f.heat<48
                 &&timeToWindow>f.cooldownSeconds+latency+.12f)
             return Decision.none("recover before target: "+scene);
-        float lookahead=Math.max(.7f,latency+Math.min(.25f,f.framePeriodMs/1000f)+.30f);
-        float horizon=body+(tip+velocity*lookahead)*scale;
-        if(distance*scale+body<horizon&&(!ready||missed)){
-            int best=lane;
-            float bestCost=laneCost(objects[lane],body,body+tip*scale,horizon,false,scale);
-            float landing=latency+.06f;
-            for(int candidate=Math.max(0,lane-1);candidate<=Math.min(2,lane+1);candidate++){
-                if(candidate!=lane&&!safeLanding(objects[candidate],body,tip,velocity,landing,scale))continue;
-                float cost=laneCost(objects[candidate],body,body+tip*scale,horizon,false,scale)+(candidate==lane?0:.15f);
-                if(cost<bestCost){best=candidate;bestCost=cost;}
-            }
-            if(best!=lane){
-                Decision d=new Decision(best<lane?Type.LEFT:Type.RIGHT,0,0,"escape before contact: "+scene,missed);
+        float cadence=Math.min(.25f,f.framePeriodMs/1000f);
+        float timeToBody=(distance-22)/velocity;
+        // Preserve the committed route through small frame-to-frame changes.
+        // An imminent collision can override this hold immediately.
+        if(f.lastMoveAt>0&&now-f.lastMoveAt<450&&!missed&&timeToBody>latency+cadence+.18f)
+            return Decision.none("hold committed route: "+scene);
+        float lookahead=Math.max(.7f,latency+cadence+.30f);
+        if(distance<tip+velocity*lookahead){
+            int destination=LaneSafety.choose(distances(objects,body,scale),lane,velocity,latency+.06f,f.framePeriodMs/1000f);
+            if(destination!=lane){
+                Decision d=new Decision(destination<lane?Type.LEFT:Type.RIGHT,0,0,"planned escape: "+scene,missed);
                 d.lane=lane;return d;
             }
         }
@@ -290,21 +289,6 @@ final class GameAnalyzer {
         decisionAt=now;
         Decision d=new Decision(next<lane?Type.LEFT:Type.RIGHT,0,0,"resume snapshot escape",true);d.lane=lane;return d;
     }
-    private boolean safeLanding(List<ObjectHit> hits,float body,float tip,float velocity,float delay,float scale){
-        float[] rocks=new float[hits.size()];
-        for(int i=0;i<rocks.length;i++)rocks[i]=(hits.get(i).y-body)/scale;
-        return LaneSafety.clear(rocks,velocity,0,delay+.35f);
-    }
-    private float laneCost(List<ObjectHit> hits, float body, float tip, float horizon, boolean ready, float scale) {
-        float cost = 0;
-        for (ObjectHit hit : hits) {
-            if (hit.y < body - 10 * scale || hit.y > horizon) continue;
-            if (hit.y < tip - 23 * scale) cost += 20;
-            else if (!ready) cost += 5;
-            else cost += hit.ore ? -1 : 1;
-        }
-        return cost;
-    }
     private ObjectHit next(List<ObjectHit> hits, float minY) {
         for (ObjectHit hit : hits) if (hit.y > minY) return hit;
         return null;
@@ -321,6 +305,8 @@ final class GameAnalyzer {
         for (int lane = 0; lane < 3; lane++) {
             int x0 = Math.max(0, Math.round(left + laneW * (lane + .22f)));
             int x1 = Math.min(w, Math.round(left + laneW * (lane + .78f)));
+            int referenceLeft=Math.max(0,Math.round(left+laneW*(lane+.10f)));
+            int referenceRight=Math.min(w-1,Math.round(left+laneW*(lane+.90f)));
             int start = Math.max(0, lane == currentLane ? Math.round(h * .32f + 32 * scale) : scanStart);
             int first = -1, last = -1, rock = 0, ore = 0;
             for (int y = start; y <= end; y++) {
@@ -331,6 +317,7 @@ final class GameAnalyzer {
                     if(lane==currentLane&&y<h*.32f+80*scale
                             &&Math.abs(x-(left+laneW*(lane+.5f)))<22*scale)continue;
                     int c = pixels[y * pixelWidth + x];
+                    if(!HazardContrast.distinct(c,pixels[y*pixelWidth+referenceLeft],pixels[y*pixelWidth+referenceRight]))continue;
                     boolean near=lane==currentLane&&y<h*.32f+115*scale;
                     if (matches(c, ROCK, 16)||(near&&matches(c,nearRock,12))) r++;
                     else if (matches(c, ORE, 8)||(near&&matches(c,nearOre,8))) o++;
